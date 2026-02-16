@@ -34,3 +34,15 @@ class GuildSettingsStore:
         channel_id = guild_cfg.get("chronicle_channel_id")
         return int(channel_id) if channel_id is not None else None
 
+    def set_voice_channel(self, guild_id: int, channel_id: int) -> None:
+        payload = self._read()
+        guilds = payload.setdefault("guilds", {})
+        guild_cfg = guilds.setdefault(str(guild_id), {})
+        guild_cfg["voice_channel_id"] = channel_id
+        self._write(payload)
+
+    def get_voice_channel(self, guild_id: int) -> int | None:
+        payload = self._read()
+        guild_cfg = payload.get("guilds", {}).get(str(guild_id), {})
+        channel_id = guild_cfg.get("voice_channel_id")
+        return int(channel_id) if channel_id is not None else None
