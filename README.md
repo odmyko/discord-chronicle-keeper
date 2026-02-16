@@ -43,6 +43,16 @@ pip install pynacl
 Copy-Item .env.example .env
 ```
 
+```powershell
+# Windows: install/verify ffmpeg for MP3 compression
+winget install -e --id Gyan.FFmpeg
+Get-Command ffmpeg
+where.exe ffmpeg
+ffmpeg -version
+```
+
+If `ffmpeg` is not found after install, restart PowerShell and check again.
+
 Fill in `.env`, then run:
 
 ```bash

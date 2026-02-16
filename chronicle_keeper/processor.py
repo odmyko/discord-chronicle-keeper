@@ -46,6 +46,7 @@ class SessionProcessor:
         guild: discord.Guild,
         sink: discord.sinks.Sink,
     ) -> SessionArtifacts:
+        print(f"[processor] start guild={guild.id} tracks={len(sink.audio_data)}")
         now = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         session_dir = self._base_data_dir / "sessions" / str(guild.id) / now
         audio_dir = session_dir / "audio"
@@ -66,8 +67,11 @@ class SessionProcessor:
                 file_obj.seek(0)
             wav_path.write_bytes(file_obj.read())
 
+            print(f"[processor] prepared audio speaker={speaker_name} user_id={user_id} file={wav_path.name}")
             compressed_path = await self._compress_audio(wav_path)
+            print(f"[processor] transcribe start speaker={speaker_name} file={compressed_path.name}")
             transcript = await self._whisper.transcribe_file(compressed_path)
+            print(f"[processor] transcribe done speaker={speaker_name} chars={len(transcript)}")
             speaker_items.append(
                 SpeakerTranscript(
                     user_id=int(user_id),
@@ -81,8 +85,10 @@ class SessionProcessor:
         full_transcript = self._build_transcript_markdown(speaker_items)
         (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
 
+        print(f"[processor] lmstudio summarize start chars={len(full_transcript)}")
         summary_markdown = await self._lmstudio.generate_summary(full_transcript)
         (session_dir / "summary.md").write_text(summary_markdown, encoding="utf-8")
+        print(f"[processor] done session_dir={session_dir}")
 
         return SessionArtifacts(
             session_dir=session_dir,
@@ -108,11 +114,14 @@ class SessionProcessor:
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except FileNotFoundError:
+            print("[processor] ffmpeg not found in PATH, keeping WAV output")
             return wav_path
         code = await proc.wait()
         if code == 0 and mp3_path.exists():
             wav_path.unlink(missing_ok=True)
+            print(f"[processor] compressed to mp3: {mp3_path.name}")
             return mp3_path
+        print(f"[processor] ffmpeg compression failed (code={code}), keeping WAV output")
         return wav_path
 
     @staticmethod
