@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 import asyncio
 from dataclasses import dataclass
+import re
+import struct
 from typing import Iterable
 
 import discord
 from discord.ext import commands
+from discord.sinks.errors import RecordingException
 
 from .config import Settings, load_settings
 from .lmstudio_client import LMStudioClient
@@ -15,6 +16,7 @@ from .whisper_client import WhisperClient
 
 
 DISCORD_SAFE_LIMIT = 1900
+VoiceLikeChannel = discord.VoiceChannel
 
 
 def chunk_text(text: str, limit: int = DISCORD_SAFE_LIMIT) -> Iterable[str]:
@@ -45,6 +47,62 @@ class GuildRecordingState:
 def build_bot(settings: Settings) -> commands.Bot:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Compatibility patch for py-cord voice mode negotiation.
+    # Some Discord regions may advertise only newer AEAD mode names, and older
+    # supported_modes lists can cause gateway.py to fail with IndexError.
+    extra_voice_modes = (
+        "aead_aes256_gcm_rtpsize",
+        "aead_xchacha20_poly1305_rtpsize",
+        "xsalsa20_poly1305_lite_rtpsize",
+        "xsalsa20_poly1305_suffix",
+        "xsalsa20_poly1305_lite",
+    )
+    try:
+        supported_modes = list(getattr(discord.VoiceClient, "supported_modes", ()) or ())
+        for mode in extra_voice_modes:
+            if mode not in supported_modes:
+                supported_modes.append(mode)
+        discord.VoiceClient.supported_modes = tuple(supported_modes)
+    except Exception:
+        pass
+
+    # Runtime support for Discord's AES-GCM RTP size mode when py-cord lacks methods.
+    try:
+        import nacl.bindings
+
+        if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
+            def _encrypt_aead_aes256_gcm_rtpsize(self, header: bytes, data) -> bytes:
+                nonce = bytearray(12)
+                nonce[:4] = struct.pack(">I", self._lite_nonce)
+                self.checked_add("_lite_nonce", 1, 4294967295)
+                ciphertext = nacl.bindings.crypto_aead_aes256gcm_encrypt(
+                    bytes(data),
+                    bytes(header),
+                    bytes(nonce),
+                    bytes(self.secret_key),
+                )
+                return header + ciphertext + nonce[:4]
+
+            setattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize", _encrypt_aead_aes256_gcm_rtpsize)
+
+        if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
+            def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
+                nonce = bytearray(12)
+                nonce[:4] = data[-4:]
+                payload = data[:-4]
+                decrypted = nacl.bindings.crypto_aead_aes256gcm_decrypt(
+                    bytes(payload),
+                    bytes(header),
+                    bytes(nonce),
+                    bytes(self.secret_key),
+                )
+                # Discord prepends 8 bytes before opus payload for *_rtpsize modes.
+                return decrypted[8:]
+
+            setattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize", _decrypt_aead_aes256_gcm_rtpsize)
+    except Exception:
+        pass
+
     intents = discord.Intents.default()
     intents.voice_states = True
     intents.guilds = True
@@ -61,48 +119,380 @@ def build_bot(settings: Settings) -> commands.Bot:
         for chunk in chunk_text(text):
             await channel.send(chunk)
 
+    async def try_send(channel: discord.abc.Messageable | None, text: str) -> bool:
+        if channel is None:
+            return False
+        try:
+            await channel.send(text)
+            return True
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return False
+
+    async def wait_voice_ready(voice_client: discord.VoiceClient, timeout_s: float = 20.0) -> bool:
+        checks = max(1, int(timeout_s * 10))
+        for _ in range(checks):
+            if voice_client.is_connected() and voice_client.channel is not None:
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
+    def voice_state_snapshot(voice_client: discord.VoiceClient | None) -> str:
+        if voice_client is None:
+            return "voice_client=None"
+        ch = getattr(voice_client, "channel", None)
+        ch_id = getattr(ch, "id", None)
+        ch_name = getattr(ch, "name", None)
+        ws = getattr(voice_client, "ws", None)
+        endpoint = getattr(ws, "endpoint", None) if ws else None
+        session_id = getattr(ws, "session_id", None) if ws else None
+        token = getattr(ws, "token", None) if ws else None
+        has_token = bool(token)
+        return (
+            f"is_connected={voice_client.is_connected()} "
+            f"channel_id={ch_id} channel_name={ch_name} "
+            f"ws={'yes' if ws else 'no'} endpoint={endpoint} "
+            f"session_id={'set' if session_id else 'none'} token={'set' if has_token else 'none'} "
+            f"latency={getattr(voice_client, 'latency', 'n/a')}"
+        )
+
+    async def start_recording_with_retry(
+        voice_client: discord.VoiceClient,
+        sink: discord.sinks.Sink,
+        done_cb,
+        text_channel: discord.abc.GuildChannel,
+        guild_id: int,
+        timeout_s: float = 90.0,
+    ) -> None:
+        last_error: Exception | None = None
+        checks = max(1, int(timeout_s / 1.0))
+        for _ in range(checks):
+            try:
+                voice_client.start_recording(sink, done_cb, text_channel, guild_id)
+                return
+            except (RecordingException, IndexError, RuntimeError) as exc:
+                last_error = exc
+                await asyncio.sleep(1.0)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to start recording for unknown reason.")
+
+    async def connect_voice_with_retry(
+        guild: discord.Guild,
+        voice_channel: VoiceLikeChannel,
+        attempts: int = 2,
+    ) -> discord.VoiceClient:
+        last_error: Exception | None = None
+        for _ in range(attempts):
+            try:
+                current = guild.voice_client
+                if current is not None:
+                    # Recreate stale/disconnected clients instead of reusing them.
+                    if (not current.is_connected()) or current.channel is None or current.channel.id != voice_channel.id:
+                        await current.disconnect(force=True)
+                        await asyncio.sleep(0.5)
+                        current = None
+                if current is None:
+                    current = await voice_channel.connect()
+                return current
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(1.0)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to establish voice connection.")
+
     @bot.event
     async def on_ready() -> None:
         print(f"Logged in as {bot.user} (id={bot.user.id})")
 
+    async def resolve_invoking_member(ctx: discord.ApplicationContext) -> discord.Member | None:
+        if ctx.guild is None or ctx.user is None:
+            return None
+        if isinstance(ctx.author, discord.Member):
+            return ctx.author
+        if isinstance(ctx.user, discord.Member):
+            return ctx.user
+
+        member = ctx.guild.get_member(ctx.user.id)
+        if member is not None:
+            return member
+        try:
+            return await ctx.guild.fetch_member(ctx.user.id)
+        except Exception:
+            return None
+
+    def _as_voice_like(channel: object | None) -> VoiceLikeChannel | None:
+        if isinstance(channel, discord.VoiceChannel):
+            return channel
+        return None
+
+    async def resolve_invoking_voice_channel(ctx: discord.ApplicationContext) -> VoiceLikeChannel | None:
+        member = await resolve_invoking_member(ctx)
+        if member and member.voice:
+            voice_like = _as_voice_like(member.voice.channel)
+            if voice_like is not None:
+                return voice_like
+
+        if ctx.guild is None or ctx.user is None:
+            return None
+
+        # Fallback path: read raw guild voice_states cache directly.
+        voice_states = getattr(ctx.guild, "voice_states", None)
+        if isinstance(voice_states, dict):
+            state = voice_states.get(ctx.user.id)
+            if state is None:
+                state = voice_states.get(str(ctx.user.id))
+            if state is not None:
+                channel = getattr(state, "channel", None)
+                voice_like = _as_voice_like(channel)
+                if voice_like is not None:
+                    return voice_like
+                channel_id = getattr(state, "channel_id", None)
+                if isinstance(channel_id, int):
+                    maybe = ctx.guild.get_channel(channel_id)
+                    voice_like = _as_voice_like(maybe)
+                    if voice_like is not None:
+                        return voice_like
+
+        for channel in ctx.guild.voice_channels:
+            if any(member_obj.id == ctx.user.id for member_obj in channel.members):
+                return channel
+        return None
+
+    def resolve_text_channel(ctx: discord.ApplicationContext, raw_channel: object | None) -> discord.TextChannel | None:
+        if ctx.guild is None:
+            return None
+
+        resolved_channel: discord.TextChannel | None = None
+        channel = raw_channel
+
+        if isinstance(channel, discord.TextChannel):
+            resolved_channel = channel
+        elif hasattr(channel, "id"):
+            maybe = ctx.guild.get_channel(int(channel.id))
+            if isinstance(maybe, discord.TextChannel):
+                resolved_channel = maybe
+        elif isinstance(channel, str):
+            channel_value = channel.strip()
+            if channel_value.startswith("#"):
+                channel_value = channel_value[1:].strip()
+
+            if channel_value:
+                exact_matches = [
+                    ch for ch in ctx.guild.text_channels if ch.name.casefold() == channel_value.casefold()
+                ]
+                if len(exact_matches) == 1:
+                    resolved_channel = exact_matches[0]
+
+            match = re.search(r"\d{15,22}", channel)
+            if match:
+                maybe = ctx.guild.get_channel(int(match.group(0)))
+                if isinstance(maybe, discord.TextChannel):
+                    resolved_channel = maybe
+
+        # Practical fallback for stale slash schema: use current text channel.
+        if resolved_channel is None and isinstance(ctx.channel, discord.TextChannel):
+            resolved_channel = ctx.channel
+
+        return resolved_channel
+
+    def resolve_voice_channel(ctx: discord.ApplicationContext, raw_channel: object | None) -> VoiceLikeChannel | None:
+        if ctx.guild is None:
+            return None
+
+        resolved_channel: VoiceLikeChannel | None = None
+        channel = raw_channel
+
+        voice_like = _as_voice_like(channel)
+        if voice_like is not None:
+            resolved_channel = voice_like
+        elif hasattr(channel, "id"):
+            maybe = ctx.guild.get_channel(int(channel.id))
+            voice_like = _as_voice_like(maybe)
+            if voice_like is not None:
+                resolved_channel = voice_like
+        elif isinstance(channel, str):
+            channel_value = channel.strip()
+            if channel_value:
+                exact_matches = [
+                    ch
+                    for ch in ctx.guild.voice_channels
+                    if ch.name.casefold() == channel_value.casefold()
+                ]
+                if len(exact_matches) == 1:
+                    resolved_channel = exact_matches[0]
+
+            match = re.search(r"\d{15,22}", channel)
+            if match:
+                maybe = ctx.guild.get_channel(int(match.group(0)))
+                voice_like = _as_voice_like(maybe)
+                if voice_like is not None:
+                    resolved_channel = voice_like
+
+        return resolved_channel
+
     @bot.slash_command(name="chronicle_setup", description="Set text channel for chronicle reports")
-    async def chronicle_setup(ctx: discord.ApplicationContext, channel: discord.TextChannel) -> None:
+    async def chronicle_setup(
+        ctx: discord.ApplicationContext,
+        channel: discord.Option(
+            input_type=discord.SlashCommandOptionType.channel,
+            description="Text channel for transcript/summary posts",
+            channel_types=[discord.ChannelType.text],
+            required=True,
+        ),
+    ) -> None:
         if ctx.guild is None:
             await ctx.respond("This command can be used only in a server.", ephemeral=True)
             return
 
-        store.set_chronicle_channel(ctx.guild.id, channel.id)
-        await ctx.respond(f"Chronicle channel set to {channel.mention}.", ephemeral=True)
+        resolved_channel = resolve_text_channel(ctx, channel)
+
+        if resolved_channel is None:
+            await ctx.respond(
+                "Could not resolve a text channel. Use this command in the target text channel or pass #channel.",
+                ephemeral=True,
+            )
+            return
+
+        store.set_chronicle_channel(ctx.guild.id, resolved_channel.id)
+        await ctx.respond(f"Chronicle channel set to {resolved_channel.mention}.", ephemeral=True)
+
+    @bot.slash_command(name="chronicle_setup_here", description="Set current text channel for chronicle reports")
+    async def chronicle_setup_here(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.respond("Run this command from a server text channel.", ephemeral=True)
+            return
+        store.set_chronicle_channel(ctx.guild.id, ctx.channel.id)
+        await ctx.respond(f"Chronicle channel set to {ctx.channel.mention}.", ephemeral=True)
+
+    @bot.slash_command(name="chronicle_setup_voice", description="Set default voice channel for recording")
+    async def chronicle_setup_voice(
+        ctx: discord.ApplicationContext,
+        channel: discord.Option(
+            input_type=discord.SlashCommandOptionType.channel,
+            description="Voice channel for recording",
+            channel_types=[discord.ChannelType.voice],
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+
+        resolved_channel = resolve_voice_channel(ctx, channel)
+
+        if resolved_channel is None:
+            await ctx.respond(
+                "Could not resolve selected voice channel.",
+                ephemeral=True,
+            )
+            return
+
+        store.set_voice_channel(ctx.guild.id, resolved_channel.id)
+        await ctx.respond(f"Default voice channel set to {resolved_channel.mention}.", ephemeral=True)
+
+    @bot.slash_command(name="chronicle_setup_channels", description="Set both voice and transcript text channels")
+    async def chronicle_setup_channels(
+        ctx: discord.ApplicationContext,
+        voice_channel: discord.Option(
+            input_type=discord.SlashCommandOptionType.channel,
+            description="Voice channel for recording",
+            channel_types=[discord.ChannelType.voice],
+            required=True,
+        ),
+        transcript_channel: discord.Option(
+            input_type=discord.SlashCommandOptionType.channel,
+            description="Text channel for transcript/summary posts",
+            channel_types=[discord.ChannelType.text],
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+
+        resolved_voice = resolve_voice_channel(ctx, voice_channel)
+        resolved_text = resolve_text_channel(ctx, transcript_channel)
+        if resolved_voice is None or resolved_text is None:
+            await ctx.respond("Could not resolve one or both channels from the selected values.", ephemeral=True)
+            return
+
+        store.set_voice_channel(ctx.guild.id, resolved_voice.id)
+        store.set_chronicle_channel(ctx.guild.id, resolved_text.id)
+        await ctx.respond(
+            f"Setup complete.\nVoice: {resolved_voice.mention}\nTranscript: {resolved_text.mention}",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
+    async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+
+        items: list[str] = []
+        for channel in ctx.guild.voice_channels:
+            items.append(f"- {channel.name} (`{channel.id}`)")
+
+        if not items:
+            await ctx.respond("No voice channels found in this server.", ephemeral=True)
+            return
+
+        await ctx.respond("Voice channels:\n" + "\n".join(items), ephemeral=True)
+
+    @bot.slash_command(name="chronicle_setup_voice_here", description="Use your current voice channel as default")
+    async def chronicle_setup_voice_here(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond("Join a voice channel first.", ephemeral=True)
+            return
+
+        voice_channel = await resolve_invoking_voice_channel(ctx)
+        if voice_channel is None:
+            await ctx.respond("Join a voice channel first.", ephemeral=True)
+            return
+        store.set_voice_channel(ctx.guild.id, voice_channel.id)
+        await ctx.respond(f"Default voice channel set to {voice_channel.mention}.", ephemeral=True)
 
     @bot.slash_command(name="chronicle_start", description="Join your voice channel and start recording")
     async def chronicle_start(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None or ctx.user is None:
             await ctx.respond("This command can be used only in a server.", ephemeral=True)
             return
+        await ctx.defer(ephemeral=True)
 
-        if not isinstance(ctx.user, discord.Member) or not ctx.user.voice or not ctx.user.voice.channel:
-            await ctx.respond("Join a voice channel first.", ephemeral=True)
+        voice_channel: VoiceLikeChannel | None = None
+        configured_voice_channel_id = store.get_voice_channel(ctx.guild.id)
+        if configured_voice_channel_id is not None:
+            configured_channel = ctx.guild.get_channel(configured_voice_channel_id)
+            voice_like = _as_voice_like(configured_channel)
+            if voice_like is not None:
+                voice_channel = voice_like
+            else:
+                await ctx.followup.send(
+                    "Configured default voice channel was not found. Re-run /chronicle_setup_voice_here.",
+                    ephemeral=True,
+                )
+                return
+
+        if voice_channel is None:
+            voice_channel = await resolve_invoking_voice_channel(ctx)
+        if voice_channel is None:
+            await ctx.followup.send("Join a voice channel first.", ephemeral=True)
             return
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         if state.sink is not None:
-            await ctx.respond("Recording already running for this guild.", ephemeral=True)
+            await ctx.followup.send("Recording already running for this guild.", ephemeral=True)
             return
         if state.processing:
-            await ctx.respond("Previous recording is still processing.", ephemeral=True)
+            await ctx.followup.send("Previous recording is still processing.", ephemeral=True)
             return
 
-        voice_channel = ctx.user.voice.channel
-        voice_client = ctx.guild.voice_client
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel.id != voice_channel.id:
-            await voice_client.move_to(voice_channel)
-
-        sink = discord.sinks.WaveSink()
-        state.sink = sink
-
-        async def on_finished(finished_sink: discord.sinks.Sink, _text_channel: discord.TextChannel, guild_id: int) -> None:
+        async def on_finished(
+            finished_sink: discord.sinks.Sink,
+            fallback_channel: discord.abc.Messageable,
+            guild_id: int,
+        ) -> None:
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
             state.processing = True
@@ -112,39 +502,85 @@ def build_bot(settings: Settings) -> commands.Bot:
                     return
 
                 chronicle_channel_id = store.get_chronicle_channel(guild_id)
-                if chronicle_channel_id is None:
-                    return
-                target_channel = guild.get_channel(chronicle_channel_id)
-                if not isinstance(target_channel, discord.TextChannel):
-                    return
+                target_channel: discord.abc.Messageable | None = None
+                if chronicle_channel_id is not None:
+                    maybe = guild.get_channel(chronicle_channel_id)
+                    if isinstance(maybe, discord.TextChannel):
+                        target_channel = maybe
+                if target_channel is None:
+                    target_channel = fallback_channel
 
                 if not finished_sink.audio_data:
-                    await target_channel.send("Recording finished, but no audio data was captured.")
+                    await try_send(target_channel, "Recording finished, but no audio data was captured.")
                     return
 
-                await target_channel.send("Processing recording: Whisper transcription + LM Studio summary...")
+                sent = await try_send(target_channel, "Processing recording: Whisper transcription + LM Studio summary...")
+                if not sent and target_channel is not fallback_channel:
+                    await try_send(fallback_channel, "Processing recording: Whisper transcription + LM Studio summary...")
                 artifacts = await processor.process_sink(guild, finished_sink)
 
-                await target_channel.send(f"Session saved: `{artifacts.session_dir}`")
-                await target_channel.send("## Full Transcript")
-                await send_long(target_channel, artifacts.full_transcript)
-                await target_channel.send("## AI Session Summary")
-                await send_long(target_channel, artifacts.summary_markdown)
+                posted = await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
+                if not posted and target_channel is not fallback_channel:
+                    target_channel = fallback_channel
+                    await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
+                await try_send(target_channel, "## Full Transcript")
+                try:
+                    await send_long(target_channel, artifacts.full_transcript)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    if target_channel is not fallback_channel:
+                        await send_long(fallback_channel, artifacts.full_transcript)
+                await try_send(target_channel, "## AI Session Summary")
+                try:
+                    await send_long(target_channel, artifacts.summary_markdown)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    if target_channel is not fallback_channel:
+                        await send_long(fallback_channel, artifacts.summary_markdown)
             except Exception as exc:
-                guild = bot.get_guild(guild_id)
-                channel_id = store.get_chronicle_channel(guild_id)
-                if guild and channel_id:
-                    channel = guild.get_channel(channel_id)
-                    if isinstance(channel, discord.TextChannel):
-                        await channel.send(f"Error while processing recording: `{exc}`")
+                sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")
+                if not sent:
+                    print(f"[on_finished] processing error: {exc}")
             finally:
                 state.processing = False
                 guild = bot.get_guild(guild_id)
                 if guild and guild.voice_client:
                     await guild.voice_client.disconnect(force=False)
 
-        voice_client.start_recording(sink, on_finished, ctx.channel, ctx.guild.id)
-        await ctx.respond(f"Recording started in {voice_channel.mention}.", ephemeral=True)
+        try:
+            voice_client = await connect_voice_with_retry(ctx.guild, voice_channel)
+
+            sink = discord.sinks.WaveSink()
+            state.sink = sink
+            # Keep a short settling delay for Discord voice handshake.
+            await asyncio.sleep(2.0)
+            await start_recording_with_retry(
+                voice_client=voice_client,
+                sink=sink,
+                done_cb=on_finished,
+                text_channel=ctx.channel,
+                guild_id=ctx.guild.id,
+            )
+        except (RecordingException, RuntimeError) as exc:
+            state.sink = None
+            snapshot = voice_state_snapshot(ctx.guild.voice_client)
+            if ctx.guild.voice_client:
+                await ctx.guild.voice_client.disconnect(force=True)
+            await ctx.followup.send(
+                f"Could not start recording: `{exc}`\nVoice state: `{snapshot}`",
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            state.sink = None
+            snapshot = voice_state_snapshot(ctx.guild.voice_client)
+            if ctx.guild.voice_client:
+                await ctx.guild.voice_client.disconnect(force=True)
+            await ctx.followup.send(
+                f"Unexpected error while starting recording: `{exc}`\nVoice state: `{snapshot}`",
+                ephemeral=True,
+            )
+            return
+
+        await ctx.followup.send(f"Recording started in {voice_channel.mention}.", ephemeral=True)
 
     @bot.slash_command(name="chronicle_stop", description="Stop recording and build chronicle")
     async def chronicle_stop(ctx: discord.ApplicationContext) -> None:

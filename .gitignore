@@ -3,6 +3,7 @@
 *.pyo
 *.pyd
 .venv/
+.venv-win/
 .env
 .env.*
 !.env.example
