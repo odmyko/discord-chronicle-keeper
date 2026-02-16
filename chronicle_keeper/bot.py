@@ -7,6 +7,7 @@ from typing import Iterable
 import discord
 from discord.ext import commands
 from discord.sinks.errors import RecordingException
+import discord.gateway as discord_gateway
 
 from .config import Settings, load_settings
 from .lmstudio_client import LMStudioClient
@@ -63,6 +64,52 @@ def build_bot(settings: Settings) -> commands.Bot:
             if mode not in supported_modes:
                 supported_modes.append(mode)
         discord.VoiceClient.supported_modes = tuple(supported_modes)
+    except Exception:
+        pass
+
+    # Prefer xchacha mode when available. Some py-cord builds can connect with AES mode
+    # but produce decode errors on receive in certain environments.
+    try:
+        if not getattr(discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False):
+            async def _patched_initial_connection(self, data):
+                state = self._connection
+                state.ssrc = data["ssrc"]
+                state.voice_port = data["port"]
+                state.endpoint_ip = data["ip"]
+
+                packet = bytearray(74)
+                struct.pack_into(">H", packet, 0, 1)
+                struct.pack_into(">H", packet, 2, 70)
+                struct.pack_into(">I", packet, 4, state.ssrc)
+                state.socket.sendto(packet, (state.endpoint_ip, state.voice_port))
+                recv = await self.loop.sock_recv(state.socket, 74)
+
+                ip_start = 8
+                ip_end = recv.index(0, ip_start)
+                state.ip = recv[ip_start:ip_end].decode("ascii")
+                state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
+
+                modes = [mode for mode in data["modes"] if mode in self._connection.supported_modes]
+                preferred_order = (
+                    "aead_xchacha20_poly1305_rtpsize",
+                    "aead_aes256_gcm_rtpsize",
+                    "xsalsa20_poly1305_lite",
+                    "xsalsa20_poly1305_suffix",
+                    "xsalsa20_poly1305",
+                )
+                mode = None
+                for preferred in preferred_order:
+                    if preferred in modes:
+                        mode = preferred
+                        break
+                if mode is None:
+                    mode = modes[0]
+
+                await self.select_protocol(state.ip, state.port, mode)
+                discord_gateway._log.info("selected the voice protocol for use (%s)", mode)
+
+            discord_gateway.DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
+            discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
     except Exception:
         pass
 
@@ -493,6 +540,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             fallback_channel: discord.abc.Messageable,
             guild_id: int,
         ) -> None:
+            print(f"[on_finished] called guild={guild_id} tracks={len(finished_sink.audio_data)}")
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
             state.processing = True
@@ -511,13 +559,20 @@ def build_bot(settings: Settings) -> commands.Bot:
                     target_channel = fallback_channel
 
                 if not finished_sink.audio_data:
-                    await try_send(target_channel, "Recording finished, but no audio data was captured.")
+                    sent_no_audio = await try_send(
+                        target_channel, "Recording finished, but no audio data was captured."
+                    )
+                    if not sent_no_audio and target_channel is not fallback_channel:
+                        await try_send(
+                            fallback_channel, "Recording finished, but no audio data was captured."
+                        )
+                    print(f"[on_finished] no audio captured guild={guild_id}")
                     return
 
                 sent = await try_send(target_channel, "Processing recording: Whisper transcription + LM Studio summary...")
                 if not sent and target_channel is not fallback_channel:
                     await try_send(fallback_channel, "Processing recording: Whisper transcription + LM Studio summary...")
-                artifacts = await processor.process_sink(guild, finished_sink)
+                artifacts = await asyncio.wait_for(processor.process_sink(guild, finished_sink), timeout=1800)
 
                 posted = await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
                 if not posted and target_channel is not fallback_channel:
@@ -535,6 +590,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                     if target_channel is not fallback_channel:
                         await send_long(fallback_channel, artifacts.summary_markdown)
+            except TimeoutError:
+                await try_send(
+                    fallback_channel,
+                    "Processing timed out (30 min). Check Whisper/LM Studio availability and bot logs.",
+                )
             except Exception as exc:
                 sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")
                 if not sent:
