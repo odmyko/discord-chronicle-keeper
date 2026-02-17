@@ -70,6 +70,7 @@ python -m chronicle_keeper.bot
 - `/chronicle_setup_voice` - set default voice channel for recording (dropdown channel picker).
 - `/chronicle_setup_voice_here` - set your current voice channel as default recording channel.
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
+- `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
 - `/chronicle_leave` - disconnect the bot from voice.

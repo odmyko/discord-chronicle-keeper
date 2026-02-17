@@ -46,3 +46,18 @@ class GuildSettingsStore:
         guild_cfg = payload.get("guilds", {}).get(str(guild_id), {})
         channel_id = guild_cfg.get("voice_channel_id")
         return int(channel_id) if channel_id is not None else None
+
+    def set_summary_language(self, guild_id: int, language: str) -> None:
+        payload = self._read()
+        guilds = payload.setdefault("guilds", {})
+        guild_cfg = guilds.setdefault(str(guild_id), {})
+        guild_cfg["summary_language"] = language.lower().strip()
+        self._write(payload)
+
+    def get_summary_language(self, guild_id: int, default: str = "ru") -> str:
+        payload = self._read()
+        guild_cfg = payload.get("guilds", {}).get(str(guild_id), {})
+        value = guild_cfg.get("summary_language", default)
+        if not isinstance(value, str) or not value.strip():
+            return default
+        return value.lower().strip()
