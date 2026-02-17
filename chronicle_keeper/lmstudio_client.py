@@ -12,11 +12,16 @@ class LMStudioClient:
         self._temperature = settings.lmstudio_temperature
         self._max_tokens = settings.lmstudio_max_tokens
 
-    async def generate_summary(self, transcript_text: str) -> str:
+    async def generate_summary(self, transcript_text: str, language: str = "ru") -> str:
         endpoint = f"{self._base_url}/chat/completions"
+        lang = (language or "ru").lower().strip()
+        if lang not in {"en", "uk", "ru"}:
+            lang = "ru"
+
+        language_names = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
         system_prompt = (
             "You are an assistant for a tabletop RPG game master. "
-            "Produce a structured session summary and a short player-facing chronicle post."
+            f"Write all output strictly in {language_names[lang]}."
         )
         user_prompt = (
             "Using the transcript below, generate a markdown response with sections:\n"
@@ -25,6 +30,7 @@ class LMStudioClient:
             "3) # NPCs and Factions\n"
             "4) # Open Threads\n"
             "5) # Player-Facing Chronicle Post\n\n"
+            f"Return all text in {language_names[lang]}.\n\n"
             "Transcript:\n"
             f"{transcript_text}"
         )

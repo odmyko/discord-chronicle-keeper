@@ -45,6 +45,7 @@ class SessionProcessor:
         self,
         guild: discord.Guild,
         sink: discord.sinks.Sink,
+        summary_language: str = "ru",
     ) -> SessionArtifacts:
         print(f"[processor] start guild={guild.id} tracks={len(sink.audio_data)}")
         now = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -86,7 +87,7 @@ class SessionProcessor:
         (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
 
         print(f"[processor] lmstudio summarize start chars={len(full_transcript)}")
-        summary_markdown = await self._lmstudio.generate_summary(full_transcript)
+        summary_markdown = await self._lmstudio.generate_summary(full_transcript, language=summary_language)
         (session_dir / "summary.md").write_text(summary_markdown, encoding="utf-8")
         print(f"[processor] done session_dir={session_dir}")
 

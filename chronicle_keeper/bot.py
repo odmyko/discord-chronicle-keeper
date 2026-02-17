@@ -471,6 +471,22 @@ def build_bot(settings: Settings) -> commands.Bot:
             ephemeral=True,
         )
 
+    @bot.slash_command(name="chronicle_setup_language", description="Set language for generated session summary")
+    async def chronicle_setup_language(
+        ctx: discord.ApplicationContext,
+        language: str = discord.Option(
+            str,
+            description="Summary language",
+            choices=["en", "uk", "ru"],
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+        store.set_summary_language(ctx.guild.id, language)
+        await ctx.respond(f"Summary language set to `{language}`.", ephemeral=True)
+
     @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
     async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
@@ -572,7 +588,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 sent = await try_send(target_channel, "Processing recording: Whisper transcription + LM Studio summary...")
                 if not sent and target_channel is not fallback_channel:
                     await try_send(fallback_channel, "Processing recording: Whisper transcription + LM Studio summary...")
-                artifacts = await asyncio.wait_for(processor.process_sink(guild, finished_sink), timeout=1800)
+                summary_language = store.get_summary_language(guild_id, default="ru")
+                artifacts = await asyncio.wait_for(
+                    processor.process_sink(guild, finished_sink, summary_language=summary_language),
+                    timeout=1800,
+                )
 
                 posted = await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
                 if not posted and target_channel is not fallback_channel:
