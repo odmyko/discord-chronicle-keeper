@@ -6,6 +6,51 @@ Discord bot for DnD/TTTRPG with a fully local pipeline:
 - generate a summary and player-facing chronicle post through a local LLM in LM Studio;
 - publish everything to a dedicated text channel for chronicles.
 
+## Quickstart (5 min)
+
+1. Clone repo and install Python deps:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+```
+Windows PowerShell equivalent:
+```powershell
+python -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+2. Fill `.env` (`DISCORD_BOT_TOKEN`, `WHISPER_BASE_URL`, `LMSTUDIO_BASE_URL` or Compose model settings).
+3. Start bot:
+```bash
+python -m chronicle_keeper.bot
+```
+4. In Discord, run:
+- `/chronicle_setup_channels`
+- `/chronicle_start`
+- `/chronicle_stop`
+
+## Architecture
+
+```mermaid
+flowchart LR
+  A[Discord Voice Channel] --> B[Chronicle Keeper Bot]
+  B --> C[Per-user Audio Segments mp3]
+  C --> D[Whisper ASR]
+  D --> E[Per-speaker Transcripts]
+  E --> F[Chunked + Hierarchical Summarization]
+  F --> G[Local LLM API]
+  G --> H[Session Summary + Chronicle Post]
+  E --> I[Session Artifacts on Disk]
+  H --> J[Discord Text Chronicle Channel]
+  I --> J
+```
+
 ## Privacy and Consent
 
 - This bot records voice conversations and stores local artifacts under `data/sessions/`.
@@ -26,33 +71,27 @@ Standalone diarization is not required: the bot receives separate tracks per Dis
 - Local Whisper service (example: `http://127.0.0.1:9000`)
 - LM Studio with OpenAI-compatible API enabled (usually `http://127.0.0.1:1234/v1`)
 
-## Setup
+## Detailed Setup
 
+Quickstart above is enough for most users. Use this section for platform-specific prerequisites and tuning.
+
+### Linux / WSL prerequisites
 ```bash
-# Linux / WSL
 sudo apt update
 sudo apt install -y python-is-python3 python3-venv
+```
+
+### Windows PowerShell prerequisites
+```powershell
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-```powershell
-# Windows PowerShell (recommended: Python 3.12)
-cd E:\workspace\discord_chronicle_keeper
-python -m venv .venv-win
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv-win\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+# Optional fallback if voice deps fail:
 pip install pynacl
-Copy-Item .env.example .env
 ```
 
+### ffmpeg check (required for MP3 compression)
 ```powershell
-# Windows: install/verify ffmpeg for MP3 compression
 winget install -e --id Gyan.FFmpeg
 Get-Command ffmpeg
 where.exe ffmpeg
@@ -61,13 +100,8 @@ ffmpeg -version
 
 If `ffmpeg` is not found after install, restart PowerShell and check again.
 
-Fill in `.env`, then run:
+### Runtime config highlights
 
-```bash
-python -m chronicle_keeper.bot
-```
-
-Optional audio preprocessing:
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
 
@@ -81,10 +115,6 @@ Long session processing options:
 - For very long sessions, chunk summaries are saved in `summary_chunks/` and combined into final `summary.md`.
 - In Discord, full transcript is posted as attached `full_transcript.txt` instead of inline long messages.
 - Bot also attempts to upload recorded speaker `.mp3` files (Discord size limits may apply).
-
-```powershell
-python -m chronicle_keeper.bot
-```
 
 ## Docker
 
@@ -200,3 +230,29 @@ docker compose up -d --build
 
 - Transcription is generated per-user track. Very dense, second-by-second interleaving of speech between players is not reconstructed as a perfect chat log.
 - Large sessions are better posted in parts: the bot already chunks long messages to fit Discord limits.
+- Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
+- Discord file size limits can prevent uploading all `.mp3` artifacts in-channel; full files remain on disk.
+
+## Versioning
+
+This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`):
+- `PATCH`: bug fixes and internal improvements.
+- `MINOR`: backward-compatible features.
+- `MAJOR`: breaking changes.
+
+Track releases and notable changes in `CHANGELOG.md`.
+
+## Testing
+
+Install dev dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run checks:
+
+```bash
+python -m compileall chronicle_keeper
+pytest -q
+```
