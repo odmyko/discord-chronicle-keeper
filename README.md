@@ -1,6 +1,6 @@
 # Discord Chronicle Keeper
 
-Discord bot for DnD/TTTRPG with a fully local pipeline:
+Discord bot for DnD/TTRPG with a fully local pipeline:
 - record a Discord voice channel;
 - transcribe audio through a local Whisper webservice (`onerahmet/openai-whisper-asr-webservice`);
 - generate a summary and player-facing chronicle post through a local LLM in LM Studio;
@@ -247,6 +247,24 @@ This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`):
 Track releases and notable changes in `CHANGELOG.md`.
 Release checklist is documented in `RELEASE.md`.
 
+## License
+
+This project is dual-licensed:
+- `AGPL-3.0-or-later`
+- Commercial license (for proprietary/commercial use without AGPL obligations)
+
+See:
+- `LICENSE`
+- `COMMERCIAL_LICENSE.md`
+- `CONTRIBUTING.md` (contribution licensing terms)
+
+## Third-party Components
+
+This repository references third-party Docker images, models, and dependencies.
+They are licensed by their respective owners.
+You are responsible for reviewing and complying with third-party license terms
+when building, running, or redistributing derived artifacts.
+
 ## Data Lifecycle
 
 Retention and cleanup are configurable in `.env`:
@@ -297,3 +315,11 @@ Run checks:
 python -m compileall chronicle_keeper
 pytest -q
 ```
+
+## Security
+
+Security policy and vulnerability reporting: `SECURITY.md`
+
+## Support
+
+Support options and channels: `SUPPORT.md`
