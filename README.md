@@ -59,6 +59,10 @@ Fill in `.env`, then run:
 python -m chronicle_keeper.bot
 ```
 
+Optional audio preprocessing:
+- `AUDIO_NORMALIZE=false` (default): only MP3 compression.
+- `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
+
 ```powershell
 python -m chronicle_keeper.bot
 ```
@@ -126,11 +130,40 @@ Notes:
 - Whisper Dockerfile is at `docker/whisper5090/Dockerfile` and reproduces the CUDA 12.8 torch patch for RTX 5090.
 - Compose overrides Whisper URL to internal service name:
   - `WHISPER_BASE_URL=http://whisper:9000`
+- Whisper model/engine are configurable via `.env`:
+  - `WHISPER_ASR_ENGINE` (`openai_whisper` or `faster_whisper`)
+  - `WHISPER_ASR_MODEL` (for example `large-v3-turbo`, `large-v3`, `distil-large-v3`)
+  - `WHISPER_ASR_MODEL_PATH` (container path for cached/local models)
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
   - `LLM_MODEL` (selected model name)
 - The bot supports both generic `LLM_*` and `LMSTUDIO_*` env vars, so you can run LLM manually or through compose models.
 - LLM model config sets max context `131072`.
+
+### Local Whisper Model (CT2)
+
+For custom local models with `faster_whisper`, convert and mount a CTranslate2 model:
+
+```bash
+ct2-transformers-converter \
+  --model anuragshas/whisper-large-v2-uk \
+  --output_dir whisper-large-v2-uk \
+  --quantization float16
+```
+
+Place converted files under `./data/whisper-models/whisper-large-v2-uk`, then set in `.env`:
+
+```env
+WHISPER_ASR_ENGINE=faster_whisper
+WHISPER_ASR_MODEL=/models/whisper/whisper-large-v2-uk
+WHISPER_ASR_MODEL_PATH=/models/whisper
+```
+
+Restart compose after changing model settings:
+
+```bash
+docker compose up -d --build
+```
 
 ## Slash Commands
 

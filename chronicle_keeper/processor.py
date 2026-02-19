@@ -36,10 +36,17 @@ class SessionArtifacts:
 
 
 class SessionProcessor:
-    def __init__(self, base_data_dir: Path, whisper: WhisperClient, lmstudio: LMStudioClient) -> None:
+    def __init__(
+        self,
+        base_data_dir: Path,
+        whisper: WhisperClient,
+        lmstudio: LMStudioClient,
+        audio_normalize: bool = False,
+    ) -> None:
         self._base_data_dir = base_data_dir
         self._whisper = whisper
         self._lmstudio = lmstudio
+        self._audio_normalize = audio_normalize
 
     async def process_sink(
         self,
@@ -100,17 +107,31 @@ class SessionProcessor:
 
     async def _compress_audio(self, wav_path: Path) -> Path:
         mp3_path = wav_path.with_suffix(".mp3")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(wav_path),
+        ffmpeg_args = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(wav_path),
+        ]
+        if self._audio_normalize:
+            ffmpeg_args.extend(
+                [
+                    "-af",
+                    "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11",
+                ]
+            )
+        ffmpeg_args.extend(
+            [
                 "-codec:a",
                 "libmp3lame",
                 "-q:a",
                 "4",
                 str(mp3_path),
+            ]
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ffmpeg_args,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -120,7 +141,10 @@ class SessionProcessor:
         code = await proc.wait()
         if code == 0 and mp3_path.exists():
             wav_path.unlink(missing_ok=True)
-            print(f"[processor] compressed to mp3: {mp3_path.name}")
+            if self._audio_normalize:
+                print(f"[processor] normalized + compressed to mp3: {mp3_path.name}")
+            else:
+                print(f"[processor] compressed to mp3: {mp3_path.name}")
             return mp3_path
         print(f"[processor] ffmpeg compression failed (code={code}), keeping WAV output")
         return wav_path
