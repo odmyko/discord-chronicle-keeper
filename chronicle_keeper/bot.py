@@ -1,8 +1,9 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 import json
 import re
+import shutil
 import struct
 from typing import Iterable
 
@@ -238,6 +239,55 @@ def build_bot(settings: Settings) -> commands.Bot:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
+    def session_timestamp_utc(session_name: str) -> datetime | None:
+        try:
+            return datetime.strptime(session_name, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+
+    def cleanup_old_sessions(retention_days: int) -> tuple[int, int]:
+        sessions_root = settings.data_dir / "sessions"
+        if retention_days <= 0 or (not sessions_root.exists()):
+            return 0, 0
+
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        removed_sessions = 0
+        removed_bytes = 0
+
+        for guild_dir in sessions_root.iterdir():
+            if not guild_dir.is_dir():
+                continue
+            for session_dir in guild_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                ts = session_timestamp_utc(session_dir.name)
+                if ts is None or ts >= cutoff:
+                    continue
+                size = 0
+                for f in session_dir.rglob("*"):
+                    if f.is_file():
+                        try:
+                            size += f.stat().st_size
+                        except OSError:
+                            pass
+                try:
+                    shutil.rmtree(session_dir)
+                    removed_sessions += 1
+                    removed_bytes += size
+                except OSError:
+                    continue
+        return removed_sessions, removed_bytes
+
+    async def run_startup_cleanup() -> None:
+        if not settings.auto_cleanup_enabled or not settings.auto_cleanup_on_start:
+            return
+        removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
+        if removed_sessions > 0:
+            print(
+                f"[cleanup] removed_sessions={removed_sessions} "
+                f"removed_bytes={removed_bytes} retention_days={settings.retention_days}"
+            )
+
     async def recover_unfinished_sessions() -> None:
         if not settings.recovery_auto_post_partial:
             return
@@ -399,6 +449,7 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.event
     async def on_ready() -> None:
         print(f"Logged in as {bot.user} (id={bot.user.id})")
+        await run_startup_cleanup()
         await recover_unfinished_sessions()
 
     async def resolve_invoking_member(ctx: discord.ApplicationContext) -> discord.Member | None:
@@ -526,6 +577,87 @@ def build_bot(settings: Settings) -> commands.Bot:
                     resolved_channel = voice_like
 
         return resolved_channel
+
+    async def require_manage_guild(ctx: discord.ApplicationContext) -> bool:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return False
+        if isinstance(ctx.author, discord.Member):
+            perms = ctx.author.guild_permissions
+            if perms.administrator or perms.manage_guild:
+                return True
+        await ctx.respond("You need `Manage Server` permission to run this command.", ephemeral=True)
+        return False
+
+    @bot.slash_command(name="chronicle_cleanup_now", description="Delete old session artifacts by retention policy")
+    async def chronicle_cleanup_now(ctx: discord.ApplicationContext) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if not settings.auto_cleanup_enabled:
+            await ctx.respond("Cleanup is disabled (`AUTO_CLEANUP_ENABLED=false`).", ephemeral=True)
+            return
+        removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
+        await ctx.respond(
+            (
+                f"Cleanup done.\n"
+                f"Retention days: `{settings.retention_days}`\n"
+                f"Removed sessions: `{removed_sessions}`\n"
+                f"Freed bytes: `{removed_bytes}`"
+            ),
+            ephemeral=True,
+        )
+
+    @bot.slash_command(name="chronicle_purge_session", description="Delete one saved session by ID")
+    async def chronicle_purge_session(
+        ctx: discord.ApplicationContext,
+        session_id: str = discord.Option(
+            str,
+            description="Session folder id, e.g. 20260219_201349",
+            required=True,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            return
+        guild_sessions_dir = settings.data_dir / "sessions" / str(ctx.guild.id)
+        session_dir = guild_sessions_dir / session_id.strip()
+        if not session_dir.exists() or not session_dir.is_dir():
+            await ctx.respond(f"Session `{session_id}` not found.", ephemeral=True)
+            return
+        try:
+            shutil.rmtree(session_dir)
+        except OSError as exc:
+            await ctx.respond(f"Failed to delete `{session_id}`: `{exc}`", ephemeral=True)
+            return
+        await ctx.respond(f"Session `{session_id}` deleted.", ephemeral=True)
+
+    @bot.slash_command(name="chronicle_purge_guild_data", description="Delete all saved data for this guild")
+    async def chronicle_purge_guild_data(
+        ctx: discord.ApplicationContext,
+        confirm: str = discord.Option(
+            str,
+            description="Type PURGE to confirm",
+            required=True,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            return
+        if confirm.strip() != "PURGE":
+            await ctx.respond("Confirmation failed. Type exactly `PURGE`.", ephemeral=True)
+            return
+        guild_sessions_dir = settings.data_dir / "sessions" / str(ctx.guild.id)
+        if not guild_sessions_dir.exists():
+            await ctx.respond("No saved session data for this guild.", ephemeral=True)
+            return
+        try:
+            shutil.rmtree(guild_sessions_dir)
+        except OSError as exc:
+            await ctx.respond(f"Failed to purge guild data: `{exc}`", ephemeral=True)
+            return
+        await ctx.respond("All saved guild session data has been deleted.", ephemeral=True)
 
     @bot.slash_command(name="chronicle_setup", description="Set text channel for chronicle reports")
     async def chronicle_setup(

@@ -6,6 +6,15 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-19
+
+### Added
+- Data lifecycle controls:
+  - auto-cleanup settings (`AUTO_CLEANUP_ENABLED`, `AUTO_CLEANUP_ON_START`, `RETENTION_DAYS`)
+  - manual cleanup/purge slash commands for server admins
+- `RELEASE.md` with release hygiene checklist.
+- Backup/restore operational guidance in README.
+
 ## [0.2.0] - 2026-02-19
 
 ### Added
