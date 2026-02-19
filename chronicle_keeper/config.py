@@ -24,6 +24,9 @@ class Settings:
     recording_rotation_seconds: int
     recovery_auto_post_partial: bool
     recovery_max_sessions: int
+    auto_cleanup_enabled: bool
+    auto_cleanup_on_start: bool
+    retention_days: int
     audio_normalize: bool
     data_dir: Path
 
@@ -66,6 +69,9 @@ def load_settings() -> Settings:
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
         recovery_auto_post_partial=_as_bool(os.getenv("RECOVERY_AUTO_POST_PARTIAL", "true"), default=True),
         recovery_max_sessions=int(os.getenv("RECOVERY_MAX_SESSIONS", "20")),
+        auto_cleanup_enabled=_as_bool(os.getenv("AUTO_CLEANUP_ENABLED", "false"), default=False),
+        auto_cleanup_on_start=_as_bool(os.getenv("AUTO_CLEANUP_ON_START", "false"), default=False),
+        retention_days=int(os.getenv("RETENTION_DAYS", "30")),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )

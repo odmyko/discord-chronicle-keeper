@@ -225,6 +225,9 @@ docker compose up -d --build
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
 - `/chronicle_leave` - disconnect the bot from voice.
+- `/chronicle_cleanup_now` - run retention cleanup immediately (Manage Server required).
+- `/chronicle_purge_session` - delete one saved session by id (Manage Server required).
+- `/chronicle_purge_guild_data` - delete all saved sessions for this guild (Manage Server required; requires `PURGE` confirmation).
 
 ## Current Limitations
 
@@ -241,6 +244,42 @@ This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`):
 - `MAJOR`: breaking changes.
 
 Track releases and notable changes in `CHANGELOG.md`.
+Release checklist is documented in `RELEASE.md`.
+
+## Data Lifecycle
+
+Retention and cleanup are configurable in `.env`:
+- `AUTO_CLEANUP_ENABLED=true|false` (default: `false`)
+- `AUTO_CLEANUP_ON_START=true|false` (default: `false`)
+- `RETENTION_DAYS=<N>`
+
+Manual lifecycle commands:
+- `/chronicle_cleanup_now`
+- `/chronicle_purge_session`
+- `/chronicle_purge_guild_data`
+
+## Backup and Restore
+
+Recommended backup target:
+- `data/guild_settings.json`
+- `data/sessions/`
+
+Example backup:
+
+```bash
+tar -czf chronicle-backup-$(date +%Y%m%d_%H%M%S).tar.gz data/guild_settings.json data/sessions
+```
+
+Example restore:
+
+```bash
+tar -xzf chronicle-backup-YYYYMMDD_HHMMSS.tar.gz
+```
+
+After restore:
+1. Start bot.
+2. Review startup recovery messages in chronicle channels.
+3. Run `/chronicle_cleanup_now` if retention policy should be applied immediately.
 
 ## Testing
 

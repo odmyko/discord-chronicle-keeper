@@ -31,4 +31,7 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.summary_chunk_chars == 14000
     assert settings.recording_rotation_seconds == 1800
     assert settings.processing_timeout_seconds == 7200
+    assert settings.auto_cleanup_enabled is False
+    assert settings.auto_cleanup_on_start is False
+    assert settings.retention_days == 30
     assert settings.lmstudio_base_url.startswith("http://127.0.0.1:")
