@@ -6,6 +6,14 @@ Discord bot for DnD/TTTRPG with a fully local pipeline:
 - generate a summary and player-facing chronicle post through a local LLM in LM Studio;
 - publish everything to a dedicated text channel for chronicles.
 
+## Privacy and Consent
+
+- This bot records voice conversations and stores local artifacts under `data/sessions/`.
+- Use this bot only with explicit participant consent and in compliance with local laws/Discord policies.
+- Review and manage retention of generated artifacts (`audio`, transcripts, summaries, checkpoints).
+- Do not commit secrets or private session artifacts to git.
+- See `SECURITY.md` for vulnerability reporting and `SUPPORT.md` for support channels.
+
 ## Diarization Notes
 
 Standalone diarization is not required: the bot receives separate tracks per Discord user (voice receive) and labels transcripts with Discord nicknames (`display_name`). In practice, this is usually better than post-diarization on a mixed track.
