@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-19
+
+### Added
+- P0 hardening:
+  - persistent active runtime session state (`data/runtime/active_sessions.json`)
+  - `ALLOW_PURGE_COMMANDS` safety switch for destructive purge commands
+  - GitHub Actions secret scanning workflow (`gitleaks`)
+
 ## [0.3.0] - 2026-02-19
 
 ### Added

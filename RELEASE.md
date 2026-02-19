@@ -15,6 +15,7 @@ This project uses a lightweight release hygiene checklist.
    - `python -m compileall chronicle_keeper`
    - `python -m pytest -q`
 4. Confirm CI is green on target commit.
+   - Includes secret scanning workflow.
 5. Move relevant notes from `Unreleased` to the new release section in `CHANGELOG.md`.
 
 ## Tagging
