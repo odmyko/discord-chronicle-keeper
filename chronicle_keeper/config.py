@@ -35,6 +35,15 @@ def load_settings() -> Settings:
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN is required in environment.")
 
+    # Compose `models` can inject endpoint/model env vars.
+    # Prefer generic LLM_* names, then legacy aliases, then LM Studio vars.
+    llm_base_url = os.getenv("LLM_BASE_URL", "").strip()
+    llm_model = os.getenv("LLM_MODEL", "").strip()
+    model_runner_base_url = os.getenv("MODEL_RUNNER_BASE_URL", "").strip()
+    model_runner_name = os.getenv("MODEL_RUNNER_MODEL", "").strip()
+    lmstudio_base_url = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    lmstudio_model = os.getenv("LMSTUDIO_MODEL", "local-model").strip()
+
     return Settings(
         discord_bot_token=token,
         whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip("/"),
@@ -42,10 +51,9 @@ def load_settings() -> Settings:
         whisper_language=os.getenv("WHISPER_LANGUAGE", "ru"),
         whisper_task=os.getenv("WHISPER_TASK", "transcribe"),
         whisper_encode=_as_bool(os.getenv("WHISPER_ENCODE", "true"), default=True),
-        lmstudio_base_url=os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/"),
-        lmstudio_model=os.getenv("LMSTUDIO_MODEL", "local-model"),
+        lmstudio_base_url=(llm_base_url or model_runner_base_url or lmstudio_base_url).rstrip("/"),
+        lmstudio_model=llm_model or model_runner_name or lmstudio_model,
         lmstudio_temperature=float(os.getenv("LMSTUDIO_TEMPERATURE", "0.2")),
         lmstudio_max_tokens=int(os.getenv("LMSTUDIO_MAX_TOKENS", "1400")),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
-
