@@ -159,7 +159,12 @@ def build_bot(settings: Settings) -> commands.Bot:
     store = GuildSettingsStore(settings.data_dir / "guild_settings.json")
     whisper = WhisperClient(settings)
     lmstudio = LMStudioClient(settings)
-    processor = SessionProcessor(settings.data_dir, whisper, lmstudio)
+    processor = SessionProcessor(
+        settings.data_dir,
+        whisper,
+        lmstudio,
+        audio_normalize=settings.audio_normalize,
+    )
     guild_state: dict[int, GuildRecordingState] = {}
 
     async def send_long(channel: discord.abc.Messageable, text: str) -> None:
