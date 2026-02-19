@@ -1,5 +1,7 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, UTC
+import json
 import re
 import struct
 from typing import Iterable
@@ -225,6 +227,102 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.rotation_task.cancel()
             state.rotation_task = None
 
+    def load_json_file(path: str) -> dict | None:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def save_json_file(path: str, payload: dict) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    async def recover_unfinished_sessions() -> None:
+        if not settings.recovery_auto_post_partial:
+            return
+
+        sessions_root = settings.data_dir / "sessions"
+        if not sessions_root.exists():
+            return
+
+        posted_count = 0
+        for guild_dir in sorted(sessions_root.iterdir(), reverse=True):
+            if posted_count >= max(1, settings.recovery_max_sessions):
+                break
+            if not guild_dir.is_dir():
+                continue
+            try:
+                guild_id = int(guild_dir.name)
+            except ValueError:
+                continue
+
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                continue
+
+            channel_id = store.get_chronicle_channel(guild_id)
+            if channel_id is None:
+                continue
+            maybe_channel = guild.get_channel(channel_id)
+            if not isinstance(maybe_channel, discord.TextChannel):
+                continue
+            chronicle_channel = maybe_channel
+
+            for session_dir in sorted(guild_dir.iterdir(), reverse=True):
+                if posted_count >= max(1, settings.recovery_max_sessions):
+                    break
+                if not session_dir.is_dir():
+                    continue
+
+                checkpoint_path = session_dir / "processing_state.json"
+                if not checkpoint_path.exists():
+                    continue
+
+                checkpoint = load_json_file(str(checkpoint_path))
+                if not checkpoint:
+                    continue
+                if checkpoint.get("status") == "done":
+                    continue
+                if checkpoint.get("recovery_posted"):
+                    continue
+
+                await try_send(
+                    chronicle_channel,
+                    (
+                        f"Recovered unfinished session: `{session_dir}`\n"
+                        "Posting available partial artifacts."
+                    ),
+                )
+                await try_send_file(
+                    chronicle_channel,
+                    str(checkpoint_path),
+                    content="`processing_state.json`",
+                )
+
+                artifact_paths = []
+                for name in ("full_transcript.txt", "summary.md", "chunk_summaries.md"):
+                    p = session_dir / name
+                    if p.exists():
+                        artifact_paths.append(str(p))
+
+                if artifact_paths:
+                    await try_send_files(
+                        chronicle_channel,
+                        artifact_paths,
+                        content="Recovered session artifacts:",
+                    )
+                else:
+                    await try_send(
+                        chronicle_channel,
+                        "No transcript/summary artifacts were found yet for this unfinished session.",
+                    )
+
+                checkpoint["recovery_posted"] = True
+                checkpoint["recovery_posted_at_utc"] = datetime.now(UTC).isoformat()
+                save_json_file(str(checkpoint_path), checkpoint)
+                posted_count += 1
+
     async def wait_voice_ready(voice_client: discord.VoiceClient, timeout_s: float = 20.0) -> bool:
         checks = max(1, int(timeout_s * 10))
         for _ in range(checks):
@@ -301,6 +399,7 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.event
     async def on_ready() -> None:
         print(f"Logged in as {bot.user} (id={bot.user.id})")
+        await recover_unfinished_sessions()
 
     async def resolve_invoking_member(ctx: discord.ApplicationContext) -> discord.Member | None:
         if ctx.guild is None or ctx.user is None:

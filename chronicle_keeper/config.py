@@ -22,6 +22,8 @@ class Settings:
     processing_timeout_seconds: int
     summary_chunk_chars: int
     recording_rotation_seconds: int
+    recovery_auto_post_partial: bool
+    recovery_max_sessions: int
     audio_normalize: bool
     data_dir: Path
 
@@ -62,6 +64,8 @@ def load_settings() -> Settings:
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
         summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
+        recovery_auto_post_partial=_as_bool(os.getenv("RECOVERY_AUTO_POST_PARTIAL", "true"), default=True),
+        recovery_max_sessions=int(os.getenv("RECOVERY_MAX_SESSIONS", "20")),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
