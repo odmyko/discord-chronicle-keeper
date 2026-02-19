@@ -19,6 +19,9 @@ class Settings:
     lmstudio_model: str
     lmstudio_temperature: float
     lmstudio_max_tokens: int
+    processing_timeout_seconds: int
+    summary_chunk_chars: int
+    recording_rotation_seconds: int
     audio_normalize: bool
     data_dir: Path
 
@@ -56,6 +59,9 @@ def load_settings() -> Settings:
         lmstudio_model=llm_model or model_runner_name or lmstudio_model,
         lmstudio_temperature=float(os.getenv("LMSTUDIO_TEMPERATURE", "0.2")),
         lmstudio_max_tokens=int(os.getenv("LMSTUDIO_MAX_TOKENS", "1400")),
+        processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
+        summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
+        recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )

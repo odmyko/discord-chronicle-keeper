@@ -63,6 +63,15 @@ Optional audio preprocessing:
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
 
+Long session processing options:
+- `PROCESSING_TIMEOUT_SECONDS=7200` sets max end-of-session processing time.
+- `SUMMARY_CHUNK_CHARS=14000` controls transcript chunk size for hierarchical summarization.
+- `RECORDING_ROTATION_SECONDS=1800` rotates recording into segments every 30 min (set `0` to disable).
+- The bot now writes processing checkpoints to `data/sessions/<guild_id>/<session_ts>/processing_state.json`.
+- For very long sessions, chunk summaries are saved in `summary_chunks/` and combined into final `summary.md`.
+- In Discord, full transcript is posted as attached `full_transcript.txt` instead of inline long messages.
+- Bot also attempts to upload recorded speaker `.mp3` files (Discord size limits may apply).
+
 ```powershell
 python -m chronicle_keeper.bot
 ```

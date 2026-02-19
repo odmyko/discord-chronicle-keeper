@@ -43,6 +43,11 @@ def chunk_text(text: str, limit: int = DISCORD_SAFE_LIMIT) -> Iterable[str]:
 class GuildRecordingState:
     sink: discord.sinks.Sink | None = None
     processing: bool = False
+    voice_channel_id: int | None = None
+    health_task: asyncio.Task | None = None
+    rotation_task: asyncio.Task | None = None
+    finalizing: bool = False
+    segment_sinks: list[discord.sinks.Sink] | None = None
 
 
 def build_bot(settings: Settings) -> commands.Bot:
@@ -164,6 +169,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         whisper,
         lmstudio,
         audio_normalize=settings.audio_normalize,
+        summary_chunk_chars=settings.summary_chunk_chars,
     )
     guild_state: dict[int, GuildRecordingState] = {}
 
@@ -179,6 +185,45 @@ def build_bot(settings: Settings) -> commands.Bot:
             return True
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             return False
+
+    async def try_send_file(
+        channel: discord.abc.Messageable | None,
+        path: str,
+        content: str | None = None,
+    ) -> bool:
+        if channel is None:
+            return False
+        try:
+            await channel.send(content=content, file=discord.File(path))
+            return True
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return False
+
+    async def try_send_files(
+        channel: discord.abc.Messageable | None,
+        paths: list[str],
+        content: str | None = None,
+        batch_size: int = 5,
+    ) -> int:
+        if channel is None or not paths:
+            return 0
+        sent = 0
+        for i in range(0, len(paths), batch_size):
+            files = [discord.File(p) for p in paths[i : i + batch_size]]
+            try:
+                await channel.send(content=content if i == 0 else None, files=files)
+                sent += len(files)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                continue
+        return sent
+
+    def stop_background_tasks(state: GuildRecordingState) -> None:
+        if state.health_task is not None:
+            state.health_task.cancel()
+            state.health_task = None
+        if state.rotation_task is not None:
+            state.rotation_task.cancel()
+            state.rotation_task = None
 
     async def wait_voice_ready(voice_client: discord.VoiceClient, timeout_s: float = 20.0) -> bool:
         checks = max(1, int(timeout_s * 10))
@@ -555,6 +600,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         if state.processing:
             await ctx.followup.send("Previous recording is still processing.", ephemeral=True)
             return
+        state.finalizing = False
+        state.segment_sinks = []
+        stop_background_tasks(state)
 
         async def on_finished(
             finished_sink: discord.sinks.Sink,
@@ -564,22 +612,55 @@ def build_bot(settings: Settings) -> commands.Bot:
             print(f"[on_finished] called guild={guild_id} tracks={len(finished_sink.audio_data)}")
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
+            if finished_sink.audio_data:
+                if state.segment_sinks is None:
+                    state.segment_sinks = []
+                state.segment_sinks.append(finished_sink)
+
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                return
+
+            chronicle_channel_id = store.get_chronicle_channel(guild_id)
+            target_channel: discord.abc.Messageable | None = None
+            if chronicle_channel_id is not None:
+                maybe = guild.get_channel(chronicle_channel_id)
+                if isinstance(maybe, discord.TextChannel):
+                    target_channel = maybe
+            if target_channel is None:
+                target_channel = fallback_channel
+
+            # Rotation stop: restart next segment instead of processing final output.
+            if not state.finalizing:
+                try:
+                    target_voice = guild.get_channel(state.voice_channel_id) if state.voice_channel_id else None
+                    target_voice = _as_voice_like(target_voice)
+                    if target_voice is None:
+                        await try_send(target_channel, "Rotation failed: voice channel is no longer available.")
+                        return
+                    recovered_client = await connect_voice_with_retry(guild, target_voice, attempts=3)
+                    next_sink = discord.sinks.WaveSink()
+                    state.sink = next_sink
+                    await asyncio.sleep(1.0)
+                    await start_recording_with_retry(
+                        voice_client=recovered_client,
+                        sink=next_sink,
+                        done_cb=on_finished,
+                        text_channel=fallback_channel,
+                        guild_id=guild_id,
+                        timeout_s=30.0,
+                    )
+                    await try_send(target_channel, "Recording segment rotated and resumed.")
+                except Exception as exc:
+                    await try_send(
+                        target_channel,
+                        f"Rotation restart failed: `{exc}`. Use `/chronicle_start` to continue.",
+                    )
+                return
+
             state.processing = True
             try:
-                guild = bot.get_guild(guild_id)
-                if guild is None:
-                    return
-
-                chronicle_channel_id = store.get_chronicle_channel(guild_id)
-                target_channel: discord.abc.Messageable | None = None
-                if chronicle_channel_id is not None:
-                    maybe = guild.get_channel(chronicle_channel_id)
-                    if isinstance(maybe, discord.TextChannel):
-                        target_channel = maybe
-                if target_channel is None:
-                    target_channel = fallback_channel
-
-                if not finished_sink.audio_data:
+                if not state.segment_sinks:
                     sent_no_audio = await try_send(
                         target_channel, "Recording finished, but no audio data was captured."
                     )
@@ -595,20 +676,49 @@ def build_bot(settings: Settings) -> commands.Bot:
                     await try_send(fallback_channel, "Processing recording: Whisper transcription + local LLM summary...")
                 summary_language = store.get_summary_language(guild_id, default="ru")
                 artifacts = await asyncio.wait_for(
-                    processor.process_sink(guild, finished_sink, summary_language=summary_language),
-                    timeout=1800,
+                    processor.process_sinks(guild, state.segment_sinks, summary_language=summary_language),
+                    timeout=settings.processing_timeout_seconds,
                 )
 
                 posted = await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
                 if not posted and target_channel is not fallback_channel:
                     target_channel = fallback_channel
                     await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
-                await try_send(target_channel, "## Full Transcript")
-                try:
-                    await send_long(target_channel, artifacts.full_transcript)
-                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                    if target_channel is not fallback_channel:
-                        await send_long(fallback_channel, artifacts.full_transcript)
+                transcript_sent = await try_send_file(
+                    target_channel,
+                    str(artifacts.full_transcript_txt_path),
+                    content="## Full Transcript (attached as .txt)",
+                )
+                if (not transcript_sent) and target_channel is not fallback_channel:
+                    await try_send_file(
+                        fallback_channel,
+                        str(artifacts.full_transcript_txt_path),
+                        content="## Full Transcript (attached as .txt)",
+                    )
+
+                mp3_paths = [
+                    str(item.audio_path)
+                    for item in artifacts.speaker_transcripts
+                    if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
+                ]
+                if mp3_paths:
+                    sent_count = await try_send_files(
+                        target_channel,
+                        mp3_paths,
+                        content="## Audio Tracks (.mp3)",
+                    )
+                    if sent_count == 0 and target_channel is not fallback_channel:
+                        sent_count = await try_send_files(
+                            fallback_channel,
+                            mp3_paths,
+                            content="## Audio Tracks (.mp3)",
+                        )
+                    if sent_count < len(mp3_paths):
+                        await try_send(
+                            target_channel,
+                            f"Uploaded {sent_count}/{len(mp3_paths)} mp3 files. "
+                            f"Remaining files are still saved in `{artifacts.session_dir}`.",
+                        )
                 await try_send(target_channel, "## AI Session Summary")
                 try:
                     await send_long(target_channel, artifacts.summary_markdown)
@@ -618,7 +728,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             except TimeoutError:
                 await try_send(
                     fallback_channel,
-                    "Processing timed out (30 min). Check Whisper/LLM availability and bot logs.",
+                    "Processing timed out. Check Whisper/LLM availability and bot logs.",
                 )
             except Exception as exc:
                 sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")
@@ -626,9 +736,98 @@ def build_bot(settings: Settings) -> commands.Bot:
                     print(f"[on_finished] processing error: {exc}")
             finally:
                 state.processing = False
+                state.finalizing = False
+                state.voice_channel_id = None
+                state.segment_sinks = []
+                stop_background_tasks(state)
                 guild = bot.get_guild(guild_id)
                 if guild and guild.voice_client:
                     await guild.voice_client.disconnect(force=False)
+
+        async def rotation_loop(
+            guild_id: int,
+            fallback_channel: discord.abc.Messageable,
+        ) -> None:
+            if settings.recording_rotation_seconds <= 0:
+                return
+            while True:
+                await asyncio.sleep(settings.recording_rotation_seconds)
+                state = guild_state.setdefault(guild_id, GuildRecordingState())
+                if state.sink is None or state.processing or state.finalizing:
+                    return
+                guild = bot.get_guild(guild_id)
+                if guild is None or guild.voice_client is None:
+                    continue
+                await try_send(
+                    fallback_channel,
+                    "Rotating recording segment...",
+                )
+                try:
+                    guild.voice_client.stop_recording()
+                except Exception as exc:
+                    await try_send(
+                        fallback_channel,
+                        f"Rotation trigger failed: `{exc}`",
+                    )
+
+        async def monitor_voice_health(
+            guild_id: int,
+            target_voice_channel: VoiceLikeChannel,
+            fallback_channel: discord.abc.Messageable,
+        ) -> None:
+            missed_checks = 0
+            while True:
+                await asyncio.sleep(12.0)
+                state = guild_state.setdefault(guild_id, GuildRecordingState())
+                if state.sink is None or state.processing:
+                    return
+
+                guild = bot.get_guild(guild_id)
+                if guild is None:
+                    return
+
+                voice_client = guild.voice_client
+                healthy = (
+                    voice_client is not None
+                    and voice_client.is_connected()
+                    and voice_client.channel is not None
+                    and voice_client.channel.id == target_voice_channel.id
+                )
+                if healthy:
+                    missed_checks = 0
+                    continue
+
+                missed_checks += 1
+                if missed_checks < 3:
+                    continue
+                missed_checks = 0
+
+                await try_send(
+                    fallback_channel,
+                    "Voice connection looks unstable. Attempting automatic reconnect...",
+                )
+                try:
+                    recovered_client = await connect_voice_with_retry(
+                        guild, target_voice_channel, attempts=3
+                    )
+                    await asyncio.sleep(1.5)
+                    await start_recording_with_retry(
+                        voice_client=recovered_client,
+                        sink=state.sink,
+                        done_cb=on_finished,
+                        text_channel=fallback_channel,
+                        guild_id=guild_id,
+                        timeout_s=20.0,
+                    )
+                    await try_send(
+                        fallback_channel,
+                        "Voice connection recovered. Recording resumed.",
+                    )
+                except Exception as exc:
+                    await try_send(
+                        fallback_channel,
+                        f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
+                    )
 
         try:
             voice_client = await connect_voice_with_retry(ctx.guild, voice_channel)
@@ -644,8 +843,18 @@ def build_bot(settings: Settings) -> commands.Bot:
                 text_channel=ctx.channel,
                 guild_id=ctx.guild.id,
             )
+            state.voice_channel_id = voice_channel.id
+            state.health_task = asyncio.create_task(
+                monitor_voice_health(ctx.guild.id, voice_channel, ctx.channel)
+            )
+            state.rotation_task = asyncio.create_task(
+                rotation_loop(ctx.guild.id, ctx.channel)
+            )
         except (RecordingException, RuntimeError) as exc:
             state.sink = None
+            state.voice_channel_id = None
+            state.finalizing = False
+            stop_background_tasks(state)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
             if ctx.guild.voice_client:
                 await ctx.guild.voice_client.disconnect(force=True)
@@ -656,6 +865,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
         except Exception as exc:
             state.sink = None
+            state.voice_channel_id = None
+            state.finalizing = False
+            stop_background_tasks(state)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
             if ctx.guild.voice_client:
                 await ctx.guild.voice_client.disconnect(force=True)
@@ -678,6 +890,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         if voice_client is None or state.sink is None:
             await ctx.respond("No active recording.", ephemeral=True)
             return
+        state.finalizing = True
+        stop_background_tasks(state)
         voice_client.stop_recording()
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
@@ -689,6 +903,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         await ctx.guild.voice_client.disconnect(force=False)
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         state.sink = None
+        state.finalizing = False
+        state.voice_channel_id = None
+        stop_background_tasks(state)
         await ctx.respond("Disconnected from voice channel.", ephemeral=True)
 
     return bot
