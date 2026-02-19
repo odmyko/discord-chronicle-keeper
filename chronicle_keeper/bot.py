@@ -585,9 +585,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     print(f"[on_finished] no audio captured guild={guild_id}")
                     return
 
-                sent = await try_send(target_channel, "Processing recording: Whisper transcription + LM Studio summary...")
+                sent = await try_send(target_channel, "Processing recording: Whisper transcription + local LLM summary...")
                 if not sent and target_channel is not fallback_channel:
-                    await try_send(fallback_channel, "Processing recording: Whisper transcription + LM Studio summary...")
+                    await try_send(fallback_channel, "Processing recording: Whisper transcription + local LLM summary...")
                 summary_language = store.get_summary_language(guild_id, default="ru")
                 artifacts = await asyncio.wait_for(
                     processor.process_sink(guild, finished_sink, summary_language=summary_language),
@@ -613,7 +613,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             except TimeoutError:
                 await try_send(
                     fallback_channel,
-                    "Processing timed out (30 min). Check Whisper/LM Studio availability and bot logs.",
+                    "Processing timed out (30 min). Check Whisper/LLM availability and bot logs.",
                 )
             except Exception as exc:
                 sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")

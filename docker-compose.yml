@@ -1,0 +1,40 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: discord-chronicle-keeper:latest
+    container_name: discord-chronicle-keeper
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WHISPER_BASE_URL: http://whisper:9000
+      DATA_DIR: /app/data
+    models:
+      llm:
+        endpoint_var: LLM_BASE_URL
+        model_var: LLM_MODEL
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - whisper
+
+  whisper:
+    build:
+      context: ./docker/whisper5090
+      dockerfile: Dockerfile
+    image: discord-chronicle-whisper5090:latest
+    container_name: whisper5090
+    restart: unless-stopped
+    gpus: all
+    environment:
+      ASR_MODEL: large-v3-turbo
+      ASR_ENGINE: faster_whisper
+    ports:
+      - "9000:9000"
+
+models:
+  llm:
+    model: ai/gpt-oss:20B-MXFP4
+    context_size: 131072

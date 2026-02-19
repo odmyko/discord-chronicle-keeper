@@ -34,7 +34,7 @@ cp .env.example .env
 ```powershell
 # Windows PowerShell (recommended: Python 3.12)
 cd E:\workspace\discord_chronicle_keeper
-py -3.12 -m venv .venv-win
+python -m venv .venv-win
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv-win\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -62,6 +62,75 @@ python -m chronicle_keeper.bot
 ```powershell
 python -m chronicle_keeper.bot
 ```
+
+## Docker
+
+Build image:
+
+```bash
+docker build -t discord-chronicle-keeper .
+```
+
+Run container:
+
+```bash
+docker run --rm \
+  --name discord-chronicle-keeper \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  discord-chronicle-keeper
+```
+
+For Docker on Windows/macOS, if Whisper and LM Studio run on your host machine,
+set these in `.env`:
+
+```env
+WHISPER_BASE_URL=http://host.docker.internal:9000
+LMSTUDIO_BASE_URL=http://host.docker.internal:1234/v1
+```
+
+## Docker Compose (Bot + Whisper + LLM model)
+
+This repo includes a full-stack compose setup:
+- `bot`: Discord Chronicle Keeper
+- `whisper`: `discord-chronicle-whisper5090:latest` (build recipe included)
+- `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
+
+Start all services:
+
+```bash
+docker compose up -d --build
+```
+
+If you previously used an `llm` service container, clean old compose objects first:
+
+```bash
+docker compose down --remove-orphans
+docker compose up -d --build
+```
+
+View logs:
+
+```bash
+docker compose logs -f bot
+docker compose logs -f whisper
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Notes:
+- Whisper Dockerfile is at `docker/whisper5090/Dockerfile` and reproduces the CUDA 12.8 torch patch for RTX 5090.
+- Compose overrides Whisper URL to internal service name:
+  - `WHISPER_BASE_URL=http://whisper:9000`
+- Compose model injection sets:
+  - `LLM_BASE_URL` (endpoint URL)
+  - `LLM_MODEL` (selected model name)
+- The bot supports both generic `LLM_*` and `LMSTUDIO_*` env vars, so you can run LLM manually or through compose models.
+- LLM model config sets max context `131072`.
 
 ## Slash Commands
 
