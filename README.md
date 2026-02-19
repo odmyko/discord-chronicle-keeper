@@ -111,6 +111,7 @@ Long session processing options:
 - `RECORDING_ROTATION_SECONDS=1800` rotates recording into segments every 30 min (set `0` to disable).
 - `RECOVERY_AUTO_POST_PARTIAL=true` attempts startup recovery post for unfinished sessions.
 - `RECOVERY_MAX_SESSIONS=20` limits how many unfinished sessions are auto-posted per startup.
+- Active runtime session state is persisted at `data/runtime/active_sessions.json`.
 - The bot now writes processing checkpoints to `data/sessions/<guild_id>/<session_ts>/processing_state.json`.
 - For very long sessions, chunk summaries are saved in `summary_chunks/` and combined into final `summary.md`.
 - In Discord, full transcript is posted as attached `full_transcript.txt` instead of inline long messages.
@@ -226,8 +227,8 @@ docker compose up -d --build
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
 - `/chronicle_leave` - disconnect the bot from voice.
 - `/chronicle_cleanup_now` - run retention cleanup immediately (Manage Server required).
-- `/chronicle_purge_session` - delete one saved session by id (Manage Server required).
-- `/chronicle_purge_guild_data` - delete all saved sessions for this guild (Manage Server required; requires `PURGE` confirmation).
+- `/chronicle_purge_session` - delete one saved session by id (Manage Server required, `ALLOW_PURGE_COMMANDS=true`).
+- `/chronicle_purge_guild_data` - delete all saved sessions for this guild (Manage Server required; requires `PURGE` confirmation and `ALLOW_PURGE_COMMANDS=true`).
 
 ## Current Limitations
 
@@ -252,6 +253,7 @@ Retention and cleanup are configurable in `.env`:
 - `AUTO_CLEANUP_ENABLED=true|false` (default: `false`)
 - `AUTO_CLEANUP_ON_START=true|false` (default: `false`)
 - `RETENTION_DAYS=<N>`
+- `ALLOW_PURGE_COMMANDS=true|false` (default: `false`)
 
 Manual lifecycle commands:
 - `/chronicle_cleanup_now`

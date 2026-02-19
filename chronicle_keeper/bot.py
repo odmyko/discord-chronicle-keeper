@@ -239,6 +239,56 @@ def build_bot(settings: Settings) -> commands.Bot:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
+    def runtime_state_path() -> str:
+        runtime_dir = settings.data_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        return str(runtime_dir / "active_sessions.json")
+
+    def load_runtime_state() -> dict:
+        payload = load_json_file(runtime_state_path())
+        if not isinstance(payload, dict):
+            return {"active_sessions": {}}
+        if "active_sessions" not in payload or not isinstance(payload.get("active_sessions"), dict):
+            payload["active_sessions"] = {}
+        return payload
+
+    def save_runtime_state(payload: dict) -> None:
+        save_json_file(runtime_state_path(), payload)
+
+    def upsert_active_session(
+        guild_id: int,
+        *,
+        status: str,
+        voice_channel_id: int | None = None,
+        chronicle_channel_id: int | None = None,
+        segment_count: int | None = None,
+        finalizing: bool | None = None,
+    ) -> None:
+        payload = load_runtime_state()
+        key = str(guild_id)
+        current = payload["active_sessions"].get(key, {})
+        now = datetime.now(UTC).isoformat()
+        entry = {
+            "guild_id": guild_id,
+            "status": status,
+            "voice_channel_id": voice_channel_id if voice_channel_id is not None else current.get("voice_channel_id"),
+            "chronicle_channel_id": (
+                chronicle_channel_id if chronicle_channel_id is not None else current.get("chronicle_channel_id")
+            ),
+            "segment_count": segment_count if segment_count is not None else current.get("segment_count", 0),
+            "finalizing": finalizing if finalizing is not None else current.get("finalizing", False),
+            "rotation_seconds": settings.recording_rotation_seconds,
+            "started_at_utc": current.get("started_at_utc", now),
+            "updated_at_utc": now,
+        }
+        payload["active_sessions"][key] = entry
+        save_runtime_state(payload)
+
+    def clear_active_session(guild_id: int) -> None:
+        payload = load_runtime_state()
+        payload["active_sessions"].pop(str(guild_id), None)
+        save_runtime_state(payload)
+
     def session_timestamp_utc(session_name: str) -> datetime | None:
         try:
             return datetime.strptime(session_name, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
@@ -449,6 +499,10 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.event
     async def on_ready() -> None:
         print(f"Logged in as {bot.user} (id={bot.user.id})")
+        runtime_state = load_runtime_state()
+        active_count = len(runtime_state.get("active_sessions", {}))
+        if active_count > 0:
+            print(f"[runtime] detected {active_count} active session entries from previous run")
         await run_startup_cleanup()
         await recover_unfinished_sessions()
 
@@ -618,6 +672,9 @@ def build_bot(settings: Settings) -> commands.Bot:
     ) -> None:
         if not await require_manage_guild(ctx):
             return
+        if not settings.allow_purge_commands:
+            await ctx.respond("Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).", ephemeral=True)
+            return
         if ctx.guild is None:
             return
         guild_sessions_dir = settings.data_dir / "sessions" / str(ctx.guild.id)
@@ -643,6 +700,9 @@ def build_bot(settings: Settings) -> commands.Bot:
     ) -> None:
         if not await require_manage_guild(ctx):
             return
+        if not settings.allow_purge_commands:
+            await ctx.respond("Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).", ephemeral=True)
+            return
         if ctx.guild is None:
             return
         if confirm.strip() != "PURGE":
@@ -662,7 +722,7 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.slash_command(name="chronicle_setup", description="Set text channel for chronicle reports")
     async def chronicle_setup(
         ctx: discord.ApplicationContext,
-        channel: discord.Option(
+        channel: discord.TextChannel = discord.Option(
             input_type=discord.SlashCommandOptionType.channel,
             description="Text channel for transcript/summary posts",
             channel_types=[discord.ChannelType.text],
@@ -696,7 +756,7 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.slash_command(name="chronicle_setup_voice", description="Set default voice channel for recording")
     async def chronicle_setup_voice(
         ctx: discord.ApplicationContext,
-        channel: discord.Option(
+        channel: discord.VoiceChannel = discord.Option(
             input_type=discord.SlashCommandOptionType.channel,
             description="Voice channel for recording",
             channel_types=[discord.ChannelType.voice],
@@ -722,13 +782,13 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.slash_command(name="chronicle_setup_channels", description="Set both voice and transcript text channels")
     async def chronicle_setup_channels(
         ctx: discord.ApplicationContext,
-        voice_channel: discord.Option(
+        voice_channel: discord.VoiceChannel = discord.Option(
             input_type=discord.SlashCommandOptionType.channel,
             description="Voice channel for recording",
             channel_types=[discord.ChannelType.voice],
             required=True,
         ),
-        transcript_channel: discord.Option(
+        transcript_channel: discord.TextChannel = discord.Option(
             input_type=discord.SlashCommandOptionType.channel,
             description="Text channel for transcript/summary posts",
             channel_types=[discord.ChannelType.text],
@@ -834,6 +894,14 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.finalizing = False
         state.segment_sinks = []
         stop_background_tasks(state)
+        upsert_active_session(
+            ctx.guild.id,
+            status="starting",
+            voice_channel_id=voice_channel.id,
+            chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+            segment_count=0,
+            finalizing=False,
+        )
 
         async def on_finished(
             finished_sink: discord.sinks.Sink,
@@ -880,6 +948,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                         text_channel=fallback_channel,
                         guild_id=guild_id,
                         timeout_s=30.0,
+                    )
+                    upsert_active_session(
+                        guild_id,
+                        status="recording",
+                        voice_channel_id=target_voice.id,
+                        chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                        segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                        finalizing=False,
                     )
                     await try_send(target_channel, "Recording segment rotated and resumed.")
                 except Exception as exc:
@@ -971,6 +1047,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.voice_channel_id = None
                 state.segment_sinks = []
                 stop_background_tasks(state)
+                clear_active_session(guild_id)
                 guild = bot.get_guild(guild_id)
                 if guild and guild.voice_client:
                     await guild.voice_client.disconnect(force=False)
@@ -992,6 +1069,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                 await try_send(
                     fallback_channel,
                     "Rotating recording segment...",
+                )
+                upsert_active_session(
+                    guild_id,
+                    status="rotating",
+                    voice_channel_id=state.voice_channel_id,
+                    chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                    segment_count=len(state.segment_sinks or []),
+                    finalizing=False,
                 )
                 try:
                     guild.voice_client.stop_recording()
@@ -1081,11 +1166,20 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.rotation_task = asyncio.create_task(
                 rotation_loop(ctx.guild.id, ctx.channel)
             )
+            upsert_active_session(
+                ctx.guild.id,
+                status="recording",
+                voice_channel_id=voice_channel.id,
+                chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+                segment_count=1,
+                finalizing=False,
+            )
         except (RecordingException, RuntimeError) as exc:
             state.sink = None
             state.voice_channel_id = None
             state.finalizing = False
             stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
             if ctx.guild.voice_client:
                 await ctx.guild.voice_client.disconnect(force=True)
@@ -1099,6 +1193,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.voice_channel_id = None
             state.finalizing = False
             stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
             if ctx.guild.voice_client:
                 await ctx.guild.voice_client.disconnect(force=True)
@@ -1123,6 +1218,14 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
         state.finalizing = True
         stop_background_tasks(state)
+        upsert_active_session(
+            ctx.guild.id,
+            status="finalizing",
+            voice_channel_id=state.voice_channel_id,
+            chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+            segment_count=len(state.segment_sinks or []),
+            finalizing=True,
+        )
         voice_client.stop_recording()
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
@@ -1137,6 +1240,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.finalizing = False
         state.voice_channel_id = None
         stop_background_tasks(state)
+        clear_active_session(ctx.guild.id)
         await ctx.respond("Disconnected from voice channel.", ephemeral=True)
 
     return bot

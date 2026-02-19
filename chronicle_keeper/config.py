@@ -27,6 +27,7 @@ class Settings:
     auto_cleanup_enabled: bool
     auto_cleanup_on_start: bool
     retention_days: int
+    allow_purge_commands: bool
     audio_normalize: bool
     data_dir: Path
 
@@ -72,6 +73,7 @@ def load_settings() -> Settings:
         auto_cleanup_enabled=_as_bool(os.getenv("AUTO_CLEANUP_ENABLED", "false"), default=False),
         auto_cleanup_on_start=_as_bool(os.getenv("AUTO_CLEANUP_ON_START", "false"), default=False),
         retention_days=int(os.getenv("RETENTION_DAYS", "30")),
+        allow_purge_commands=_as_bool(os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
