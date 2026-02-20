@@ -14,7 +14,7 @@ from typing import NamedTuple
 import discord
 
 from .llm_client import LLMClient
-from .whisper_client import WhisperClient
+from .whisper_client import WhisperClient, TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,16 @@ class SpeakerTranscript:
     speaker_name: str
     audio_path: Path
     transcript: str
+
+
+@dataclass
+class TimelineEntry:
+    segment_index: int
+    start_seconds: float
+    end_seconds: float
+    user_id: int
+    speaker_name: str
+    text: str
 
 
 @dataclass
@@ -57,6 +67,7 @@ class SessionProcessor:
         whisper: WhisperClient,
         llm: LLMClient,
         audio_normalize: bool = False,
+        audio_vad_enabled: bool = False,
         audio_target_sample_rate: int = 0,
         audio_target_channels: int = 0,
         audio_mp3_vbr_quality: int = 4,
@@ -66,6 +77,7 @@ class SessionProcessor:
         self._whisper = whisper
         self._llm = llm
         self._audio_normalize = audio_normalize
+        self._audio_vad_enabled = audio_vad_enabled
         self._audio_target_sample_rate = max(0, audio_target_sample_rate)
         self._audio_target_channels = max(0, audio_target_channels)
         self._audio_mp3_vbr_quality = min(9, max(0, audio_mp3_vbr_quality))
@@ -120,6 +132,7 @@ class SessionProcessor:
 
         speaker_items: list[SpeakerTranscript] = []
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
+        timeline_entries: list[TimelineEntry] = []
         segment_index = 0
 
         for sink in valid_sinks:
@@ -149,11 +162,20 @@ class SessionProcessor:
                     speaker_name,
                     compressed_path.name,
                 )
-                transcript = await self._whisper.transcribe_file(compressed_path)
+                transcript_result = await self._whisper.transcribe_file_detailed(compressed_path)
+                transcript = transcript_result.text
                 logger.debug(
                     "[processor] transcribe done speaker=%s chars=%s",
                     speaker_name,
                     len(transcript),
+                )
+                timeline_entries.extend(
+                    self._timeline_entries_from_segments(
+                        transcript_result.segments,
+                        segment_index=segment_index,
+                        user_id=int(user_id),
+                        speaker_name=speaker_name,
+                    )
                 )
                 transcript_path = transcript_dir / f"{base_name}.md"
                 transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
@@ -181,9 +203,12 @@ class SessionProcessor:
                 )
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
-        full_transcript = self._build_transcript_markdown(merged_items)
+        timeline_entries.sort(
+            key=lambda item: (item.segment_index, item.start_seconds, item.end_seconds, item.user_id)
+        )
+        full_transcript = self._build_transcript_markdown(merged_items, timeline_entries)
         (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
-        full_transcript_txt = self._build_transcript_text(merged_items)
+        full_transcript_txt = self._build_transcript_text(merged_items, timeline_entries)
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
         checkpoint["status"] = "summarizing"
@@ -267,6 +292,7 @@ class SessionProcessor:
 
         speaker_items: list[SpeakerTranscript] = []
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
+        timeline_entries: list[TimelineEntry] = []
         for entry in entries:
             logger.debug(
                 "[reprocess] transcribe start speaker=%s user_id=%s file=%s",
@@ -274,12 +300,21 @@ class SessionProcessor:
                 entry.user_id,
                 entry.path.name,
             )
-            transcript = await self._whisper.transcribe_file(entry.path)
+            transcript_result = await self._whisper.transcribe_file_detailed(entry.path)
+            transcript = transcript_result.text
             logger.debug(
                 "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
                 entry.speaker_name,
                 entry.user_id,
                 len(transcript),
+            )
+            timeline_entries.extend(
+                self._timeline_entries_from_segments(
+                    transcript_result.segments,
+                    segment_index=entry.segment_index,
+                    user_id=entry.user_id,
+                    speaker_name=entry.speaker_name,
+                )
             )
             transcript_path = transcript_dir / f"{entry.path.stem}.md"
             transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
@@ -305,9 +340,12 @@ class SessionProcessor:
                 )
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
-        full_transcript = self._build_transcript_markdown(merged_items)
+        timeline_entries.sort(
+            key=lambda item: (item.segment_index, item.start_seconds, item.end_seconds, item.user_id)
+        )
+        full_transcript = self._build_transcript_markdown(merged_items, timeline_entries)
         (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
-        full_transcript_txt = self._build_transcript_text(merged_items)
+        full_transcript_txt = self._build_transcript_text(merged_items, timeline_entries)
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
 
@@ -362,13 +400,17 @@ class SessionProcessor:
             ffmpeg_args.extend(["-ac", str(self._audio_target_channels)])
         if self._audio_target_sample_rate > 0:
             ffmpeg_args.extend(["-ar", str(self._audio_target_sample_rate)])
+        audio_filters: list[str] = []
         if self._audio_normalize:
-            ffmpeg_args.extend(
-                [
-                    "-af",
-                    "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11",
-                ]
+            audio_filters.append("highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11")
+        if self._audio_vad_enabled:
+            # Conservative silence trimming for speech: keep short pauses, trim longer silence.
+            audio_filters.append(
+                "silenceremove=start_periods=1:start_duration=0.25:start_threshold=-45dB:"
+                "stop_periods=-1:stop_duration=0.50:stop_threshold=-45dB"
             )
+        if audio_filters:
+            ffmpeg_args.extend(["-af", ",".join(audio_filters)])
         ffmpeg_args.extend(
             [
                 "-codec:a",
@@ -390,10 +432,12 @@ class SessionProcessor:
         code = await proc.wait()
         if code == 0 and mp3_path.exists():
             wav_path.unlink(missing_ok=True)
-            if self._audio_normalize:
-                logger.info("[processor] normalized + compressed to mp3: %s", mp3_path.name)
-            else:
-                logger.info("[processor] compressed to mp3: %s", mp3_path.name)
+            logger.info(
+                "[processor] compressed to mp3: %s normalize=%s vad=%s",
+                mp3_path.name,
+                self._audio_normalize,
+                self._audio_vad_enabled,
+            )
             return mp3_path
         logger.warning("[processor] ffmpeg compression failed (code=%s), keeping WAV output", code)
         return wav_path
@@ -469,17 +513,86 @@ class SessionProcessor:
         return chunks
 
     @staticmethod
-    def _build_transcript_markdown(items: list[SpeakerTranscript]) -> str:
+    def _timeline_entries_from_segments(
+        segments: list[TranscriptSegment],
+        *,
+        segment_index: int,
+        user_id: int,
+        speaker_name: str,
+    ) -> list[TimelineEntry]:
+        entries: list[TimelineEntry] = []
+        for seg in segments:
+            if not seg.text.strip():
+                continue
+            entries.append(
+                TimelineEntry(
+                    segment_index=max(0, segment_index),
+                    start_seconds=max(0.0, seg.start),
+                    end_seconds=max(0.0, seg.end),
+                    user_id=user_id,
+                    speaker_name=speaker_name,
+                    text=seg.text.strip(),
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _format_ts(seconds: float) -> str:
+        total_ms = max(0, int(seconds * 1000))
+        minutes, remainder_ms = divmod(total_ms, 60_000)
+        secs, ms = divmod(remainder_ms, 1000)
+        return f"{minutes:02d}:{secs:02d}.{ms:03d}"
+
+    @classmethod
+    def _build_transcript_markdown(
+        cls,
+        items: list[SpeakerTranscript],
+        timeline: list[TimelineEntry],
+    ) -> str:
         lines = ["# Full Transcript", ""]
+        lines.append("## Chronological Timeline (Approximate)")
+        if timeline:
+            for item in timeline:
+                lines.append(
+                    (
+                        f"- [seg{item.segment_index:03d} "
+                        f"{cls._format_ts(item.start_seconds)}-{cls._format_ts(item.end_seconds)}] "
+                        f"**{item.speaker_name}** (`{item.user_id}`): {item.text}"
+                    )
+                )
+        else:
+            lines.append("_No timed segments available from Whisper for this session._")
+        lines.append("")
+        lines.append("## Speaker Buckets")
+        lines.append("")
         for item in items:
             lines.append(f"## {item.speaker_name} (`{item.user_id}`)")
             lines.append(item.transcript or "_[no speech detected]_")
             lines.append("")
         return "\n".join(lines).strip() + "\n"
 
-    @staticmethod
-    def _build_transcript_text(items: list[SpeakerTranscript]) -> str:
+    @classmethod
+    def _build_transcript_text(
+        cls,
+        items: list[SpeakerTranscript],
+        timeline: list[TimelineEntry],
+    ) -> str:
         lines = ["Full Transcript", ""]
+        lines.append("Chronological Timeline (Approximate)")
+        if timeline:
+            for item in timeline:
+                lines.append(
+                    (
+                        f"[seg{item.segment_index:03d} "
+                        f"{cls._format_ts(item.start_seconds)}-{cls._format_ts(item.end_seconds)}] "
+                        f"{item.speaker_name} ({item.user_id}): {item.text}"
+                    )
+                )
+        else:
+            lines.append("No timed segments available from Whisper for this session.")
+        lines.append("")
+        lines.append("Speaker Buckets")
+        lines.append("")
         for item in items:
             lines.append(f"{item.speaker_name} ({item.user_id})")
             lines.append(item.transcript or "[no speech detected]")

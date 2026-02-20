@@ -67,6 +67,7 @@ async def _run() -> int:
         whisper,
         llm,
         audio_normalize=settings.audio_normalize,
+        audio_vad_enabled=settings.audio_vad_enabled,
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,

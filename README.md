@@ -104,6 +104,8 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
+- `AUDIO_VAD_ENABLED=false` (default): keep pauses/silence as-is.
+- `AUDIO_VAD_ENABLED=true`: trim longer silence using conservative ffmpeg `silenceremove` settings.
 - `AUDIO_MP3_VBR_QUALITY=4` (default): MP3 VBR quality (`0` best/largest .. `9` smallest).
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
@@ -270,11 +272,12 @@ mismatch in `faster_whisper`).
 
 ## Current Limitations
 
-- Transcription is generated per-user track. Very dense, second-by-second interleaving of speech between players is not reconstructed as a perfect chat log.
+- Transcription is generated per-user track. Bot now builds an approximate chronological timeline using Whisper segment timestamps, but it is still not a sample-accurate multi-speaker chat log.
 - Large sessions are better posted in parts: the bot already chunks long messages to fit Discord limits.
 - Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
 - Discord file size limits can prevent uploading all `.mp3` artifacts in-channel; full files remain on disk.
 - Quality report is heuristic (duration/bitrate/reconnect/rotation counters) and not a full audio QA system.
+- If `AUDIO_VAD_ENABLED=true`, silence trimming can shift perceived per-speaker timing; timeline remains approximate.
 
 ## Versioning
 

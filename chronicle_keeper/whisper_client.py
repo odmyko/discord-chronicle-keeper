@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
 
 import aiohttp
 
 from .config import Settings
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass(frozen=True)
+class TranscriptResult:
+    text: str
+    segments: list[TranscriptSegment]
 
 
 class WhisperClient:
@@ -17,18 +31,22 @@ class WhisperClient:
         self._encode = settings.whisper_encode
 
     async def transcribe_file(self, audio_path: Path) -> str:
+        result = await self.transcribe_file_detailed(audio_path)
+        return result.text
+
+    async def transcribe_file_detailed(self, audio_path: Path) -> TranscriptResult:
         text = await self._transcribe_once(audio_path, language=self._language)
-        if text:
+        if text.text:
             return text
 
         # Fallback: retry with auto language if configured language produced empty output.
         if self._language and self._language.lower() not in {"auto", "none"}:
             text = await self._transcribe_once(audio_path, language="")
-            if text:
+            if text.text:
                 return text
-        return ""
+        return TranscriptResult(text="", segments=[])
 
-    async def _transcribe_once(self, audio_path: Path, language: str) -> str:
+    async def _transcribe_once(self, audio_path: Path, language: str) -> TranscriptResult:
         endpoint = f"{self._base_url}{self._asr_path}"
         params = {
             "task": self._task,
@@ -58,25 +76,46 @@ class WhisperClient:
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
-            return body.strip()
+            text = body.strip()
+            return TranscriptResult(text=text, segments=[])
 
-        # Standard whisper JSON shape
-        text = payload.get("text", "")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-        # Some variants return only segments with per-segment text.
+        # Some variants return segments with per-segment timing/text.
         segments = payload.get("segments")
+        parsed_segments: list[TranscriptSegment] = []
         if isinstance(segments, list):
             parts: list[str] = []
             for seg in segments:
                 if isinstance(seg, dict):
                     seg_text = seg.get("text")
                     if isinstance(seg_text, str) and seg_text.strip():
-                        parts.append(seg_text.strip())
+                        cleaned = seg_text.strip()
+                        parts.append(cleaned)
+                        start = seg.get("start")
+                        end = seg.get("end")
+                        try:
+                            start_f = float(start) if start is not None else 0.0
+                            end_f = float(end) if end is not None else start_f
+                        except (TypeError, ValueError):
+                            start_f = 0.0
+                            end_f = 0.0
+                        parsed_segments.append(
+                            TranscriptSegment(
+                                start=max(0.0, start_f),
+                                end=max(0.0, end_f),
+                                text=cleaned,
+                            )
+                        )
             if parts:
-                return " ".join(parts).strip()
+                return TranscriptResult(
+                    text=" ".join(parts).strip(),
+                    segments=parsed_segments,
+                )
+
+        # Standard whisper JSON shape
+        text = payload.get("text", "")
+        if isinstance(text, str) and text.strip():
+            return TranscriptResult(text=text.strip(), segments=parsed_segments)
 
         if isinstance(text, str):
-            return text.strip()
-        return str(text).strip()
+            return TranscriptResult(text=text.strip(), segments=parsed_segments)
+        return TranscriptResult(text=str(text).strip(), segments=parsed_segments)

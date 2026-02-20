@@ -29,6 +29,7 @@ class Settings:
     retention_days: int
     allow_purge_commands: bool
     audio_normalize: bool
+    audio_vad_enabled: bool
     audio_target_sample_rate: int
     audio_target_channels: int
     audio_mp3_vbr_quality: int
@@ -83,6 +84,7 @@ def load_settings() -> Settings:
         retention_days=int(os.getenv("RETENTION_DAYS", "30")),
         allow_purge_commands=_as_bool(os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
+        audio_vad_enabled=_as_bool(os.getenv("AUDIO_VAD_ENABLED", "false"), default=False),
         audio_target_sample_rate=int(os.getenv("AUDIO_TARGET_SAMPLE_RATE", "0")),
         audio_target_channels=int(os.getenv("AUDIO_TARGET_CHANNELS", "0")),
         audio_mp3_vbr_quality=audio_mp3_vbr_quality,

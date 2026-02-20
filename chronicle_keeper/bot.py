@@ -186,6 +186,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         whisper,
         llm,
         audio_normalize=settings.audio_normalize,
+        audio_vad_enabled=settings.audio_vad_enabled,
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
@@ -344,6 +345,21 @@ def build_bot(settings: Settings) -> commands.Bot:
         if state.rotation_task is not None:
             state.rotation_task.cancel()
             state.rotation_task = None
+
+    def append_segment_sink_if_needed(
+        state: GuildRecordingState,
+        sink: discord.sinks.Sink | None,
+    ) -> bool:
+        if sink is None or not getattr(sink, "audio_data", None):
+            return False
+        if not sink.audio_data:
+            return False
+        if state.segment_sinks is None:
+            state.segment_sinks = []
+        if any(existing is sink for existing in state.segment_sinks):
+            return False
+        state.segment_sinks.append(sink)
+        return True
 
     def load_json_file(path: str) -> dict | None:
         try:
@@ -782,24 +798,46 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             try:
                 state.reconnect_attempts += 1
+                previous_sink = state.sink
+                if previous_sink is None:
+                    raise RuntimeError("Active recording sink not found.")
                 recovered_client = await connect_voice_with_retry(
                     guild, target_voice_channel, attempts=3
                 )
                 await asyncio.sleep(1.5)
+                next_sink = discord.sinks.WaveSink()
                 await start_recording_with_retry(
                     voice_client=recovered_client,
-                    sink=state.sink,
+                    sink=next_sink,
                     done_cb=done_cb,
                     text_channel=fallback_channel,
                     guild_id=guild_id,
                     timeout_s=20.0,
                 )
+                preserved = append_segment_sink_if_needed(state, previous_sink)
+                state.sink = next_sink
+                upsert_active_session(
+                    guild_id,
+                    status="recording",
+                    voice_channel_id=target_voice_channel.id,
+                    chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                    segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                    finalizing=False,
+                )
                 await try_send(
                     fallback_channel,
-                    "Voice connection recovered. Recording resumed.",
+                    (
+                        "Voice connection recovered. Recording resumed in a new segment."
+                        if preserved
+                        else "Voice connection recovered. Recording resumed."
+                    ),
                 )
                 state.reconnect_successes += 1
-                logger.info("[voice-health] recovered guild_id=%s", guild_id)
+                logger.info(
+                    "[voice-health] recovered guild_id=%s preserved_previous_sink=%s",
+                    guild_id,
+                    preserved,
+                )
             except Exception as exc:
                 state.reconnect_failures += 1
                 logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
@@ -1326,20 +1364,24 @@ def build_bot(settings: Settings) -> commands.Bot:
 
             resumed = False
             if (
-                state.sink is not None
-                and state.done_callback is not None
+                state.done_callback is not None
                 and state.fallback_channel is not None
                 and not state.processing
                 and not state.finalizing
             ):
+                previous_sink = state.sink
+                resume_sink = discord.sinks.WaveSink()
                 await start_recording_with_retry(
                     voice_client=voice_client,
-                    sink=state.sink,
+                    sink=resume_sink,
                     done_cb=state.done_callback,
                     text_channel=state.fallback_channel,
                     guild_id=ctx.guild.id,
                     timeout_s=20.0,
                 )
+                if previous_sink is not None:
+                    append_segment_sink_if_needed(state, previous_sink)
+                state.sink = resume_sink
                 stop_background_tasks(state)
                 state.health_task = asyncio.create_task(
                     monitor_voice_health(
@@ -1477,10 +1519,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             logger.info("[on_finished] called guild=%s tracks=%s", guild_id, len(finished_sink.audio_data))
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
-            if finished_sink.audio_data:
-                if state.segment_sinks is None:
-                    state.segment_sinks = []
-                state.segment_sinks.append(finished_sink)
+            append_segment_sink_if_needed(state, finished_sink)
 
             guild = bot.get_guild(guild_id)
             if guild is None:

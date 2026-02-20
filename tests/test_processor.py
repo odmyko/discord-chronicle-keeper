@@ -30,7 +30,7 @@ def test_build_transcript_text():
             transcript="world",
         ),
     ]
-    result = SessionProcessor._build_transcript_text(items)
+    result = SessionProcessor._build_transcript_text(items, [])
     assert "alice (1)" in result
     assert "bob (2)" in result
 
