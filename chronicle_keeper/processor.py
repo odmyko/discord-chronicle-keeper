@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, UTC
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 import re
 from collections import OrderedDict
@@ -13,6 +14,8 @@ import discord
 
 from .lmstudio_client import LMStudioClient
 from .whisper_client import WhisperClient
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_name(value: str) -> str:
@@ -72,9 +75,11 @@ class SessionProcessor:
         if not valid_sinks:
             raise RuntimeError("No audio data captured in any recording segment.")
 
-        print(
-            f"[processor] start guild={guild.id} segments={len(valid_sinks)} "
-            f"tracks={sum(len(s.audio_data) for s in valid_sinks)}"
+        logger.info(
+            "[processor] start guild=%s segments=%s tracks=%s",
+            guild.id,
+            len(valid_sinks),
+            sum(len(s.audio_data) for s in valid_sinks),
         )
         now = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         session_dir = self._base_data_dir / "sessions" / str(guild.id) / now
@@ -118,11 +123,24 @@ class SessionProcessor:
                     file_obj.seek(0)
                 wav_path.write_bytes(file_obj.read())
 
-                print(f"[processor] prepared audio speaker={speaker_name} user_id={user_id} file={wav_path.name}")
+                logger.debug(
+                    "[processor] prepared audio speaker=%s user_id=%s file=%s",
+                    speaker_name,
+                    user_id,
+                    wav_path.name,
+                )
                 compressed_path = await self._compress_audio(wav_path)
-                print(f"[processor] transcribe start speaker={speaker_name} file={compressed_path.name}")
+                logger.debug(
+                    "[processor] transcribe start speaker=%s file=%s",
+                    speaker_name,
+                    compressed_path.name,
+                )
                 transcript = await self._whisper.transcribe_file(compressed_path)
-                print(f"[processor] transcribe done speaker={speaker_name} chars={len(transcript)}")
+                logger.debug(
+                    "[processor] transcribe done speaker=%s chars=%s",
+                    speaker_name,
+                    len(transcript),
+                )
                 transcript_path = transcript_dir / f"{base_name}.md"
                 transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
                 speaker_items.append(
@@ -160,7 +178,11 @@ class SessionProcessor:
         chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
         checkpoint["summary_chunks_total"] = len(chunks)
         self._write_checkpoint(checkpoint_path, checkpoint)
-        print(f"[processor] summarize start chars={len(full_transcript)} chunks={len(chunks)}")
+        logger.info(
+            "[processor] summarize start chars=%s chunks=%s",
+            len(full_transcript),
+            len(chunks),
+        )
 
         if len(chunks) <= 1:
             summary_markdown = await self._lmstudio.generate_summary(full_transcript, language=summary_language)
@@ -194,7 +216,7 @@ class SessionProcessor:
         checkpoint["final_summary_done"] = True
         checkpoint["status"] = "done"
         self._write_checkpoint(checkpoint_path, checkpoint)
-        print(f"[processor] done session_dir={session_dir}")
+        logger.info("[processor] done session_dir=%s", session_dir)
 
         return SessionArtifacts(
             session_dir=session_dir,
@@ -236,17 +258,17 @@ class SessionProcessor:
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except FileNotFoundError:
-            print("[processor] ffmpeg not found in PATH, keeping WAV output")
+            logger.warning("[processor] ffmpeg not found in PATH, keeping WAV output")
             return wav_path
         code = await proc.wait()
         if code == 0 and mp3_path.exists():
             wav_path.unlink(missing_ok=True)
             if self._audio_normalize:
-                print(f"[processor] normalized + compressed to mp3: {mp3_path.name}")
+                logger.info("[processor] normalized + compressed to mp3: %s", mp3_path.name)
             else:
-                print(f"[processor] compressed to mp3: {mp3_path.name}")
+                logger.info("[processor] compressed to mp3: %s", mp3_path.name)
             return mp3_path
-        print(f"[processor] ffmpeg compression failed (code={code}), keeping WAV output")
+        logger.warning("[processor] ffmpeg compression failed (code=%s), keeping WAV output", code)
         return wav_path
 
     @staticmethod

@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 import json
+import logging
 import re
 import shutil
 import struct
@@ -21,6 +22,7 @@ from .whisper_client import WhisperClient
 
 DISCORD_SAFE_LIMIT = 1900
 VoiceLikeChannel = discord.VoiceChannel
+logger = logging.getLogger(__name__)
 
 
 def chunk_text(text: str, limit: int = DISCORD_SAFE_LIMIT) -> Iterable[str]:
@@ -333,9 +335,11 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
         removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
         if removed_sessions > 0:
-            print(
-                f"[cleanup] removed_sessions={removed_sessions} "
-                f"removed_bytes={removed_bytes} retention_days={settings.retention_days}"
+            logger.info(
+                "[cleanup] removed_sessions=%s removed_bytes=%s retention_days=%s",
+                removed_sessions,
+                removed_bytes,
+                settings.retention_days,
             )
 
     async def recover_unfinished_sessions() -> None:
@@ -498,11 +502,11 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     @bot.event
     async def on_ready() -> None:
-        print(f"Logged in as {bot.user} (id={bot.user.id})")
+        logger.info("Logged in as %s (id=%s)", bot.user, bot.user.id)
         runtime_state = load_runtime_state()
         active_count = len(runtime_state.get("active_sessions", {}))
         if active_count > 0:
-            print(f"[runtime] detected {active_count} active session entries from previous run")
+            logger.info("[runtime] detected %s active session entries from previous run", active_count)
         await run_startup_cleanup()
         await recover_unfinished_sessions()
 
@@ -908,7 +912,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             fallback_channel: discord.abc.Messageable,
             guild_id: int,
         ) -> None:
-            print(f"[on_finished] called guild={guild_id} tracks={len(finished_sink.audio_data)}")
+            logger.info("[on_finished] called guild=%s tracks=%s", guild_id, len(finished_sink.audio_data))
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
             if finished_sink.audio_data:
@@ -975,7 +979,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                         await try_send(
                             fallback_channel, "Recording finished, but no audio data was captured."
                         )
-                    print(f"[on_finished] no audio captured guild={guild_id}")
+                    logger.warning("[on_finished] no audio captured guild=%s", guild_id)
                     return
 
                 sent = await try_send(target_channel, "Processing recording: Whisper transcription + local LLM summary...")
@@ -1040,7 +1044,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             except Exception as exc:
                 sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")
                 if not sent:
-                    print(f"[on_finished] processing error: {exc}")
+                    logger.exception("[on_finished] processing error guild=%s", guild_id)
             finally:
                 state.processing = False
                 state.finalizing = False
@@ -1247,6 +1251,10 @@ def build_bot(settings: Settings) -> commands.Bot:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     settings = load_settings()
     bot = build_bot(settings)
     bot.run(settings.discord_bot_token)

@@ -1,4 +1,4 @@
-# Discord Chronicle Keeper
+﻿# Discord Chronicle Keeper
 
 Discord bot for DnD/TTRPG with a fully local pipeline:
 - record a Discord voice channel;
@@ -309,11 +309,18 @@ Install dev dependencies:
 pip install -r requirements-dev.txt
 ```
 
-Run checks:
+Run checks from repository root:
 
+Linux / WSL:
 ```bash
 python -m compileall chronicle_keeper
-pytest -q
+python -m pytest -q
+```
+
+Windows PowerShell:
+```powershell
+python -m compileall chronicle_keeper
+python -m pytest -q
 ```
 
 ## Security
@@ -323,3 +330,4 @@ Security policy and vulnerability reporting: `SECURITY.md`
 ## Support
 
 Support options and channels: `SUPPORT.md`
+
