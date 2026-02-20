@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 import json
 import logging
+from pathlib import Path
 import re
 import shutil
 import struct
@@ -407,6 +408,18 @@ def build_bot(settings: Settings) -> commands.Bot:
             return datetime.strptime(session_name, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
         except ValueError:
             return None
+
+    def latest_session_dir_for_guild(guild_id: int) -> Path | None:
+        guild_sessions_dir = settings.data_dir / "sessions" / str(guild_id)
+        if not guild_sessions_dir.exists() or not guild_sessions_dir.is_dir():
+            return None
+        candidates = [
+            p for p in guild_sessions_dir.iterdir() if p.is_dir() and session_timestamp_utc(p.name) is not None
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.name, reverse=True)
+        return candidates[0]
 
     def cleanup_old_sessions(retention_days: int) -> tuple[int, int]:
         sessions_root = settings.data_dir / "sessions"
@@ -1063,6 +1076,80 @@ def build_bot(settings: Settings) -> commands.Bot:
             f"- Reconnect counters: `attempts={state.reconnect_attempts}, success={state.reconnect_successes}, failed={state.reconnect_failures}`"
         )
         await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @bot.slash_command(
+        name="chronicle_reprocess_last",
+        description="Reprocess the latest saved session for this guild",
+    )
+    async def chronicle_reprocess_last(ctx: discord.ApplicationContext) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+        await ctx.defer(ephemeral=True)
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.sink is not None:
+            await ctx.followup.send("Cannot reprocess while recording is active.", ephemeral=True)
+            return
+        if state.processing:
+            await ctx.followup.send("Another processing task is already running.", ephemeral=True)
+            return
+
+        session_dir = latest_session_dir_for_guild(ctx.guild.id)
+        if session_dir is None:
+            await ctx.followup.send("No saved sessions found for this guild.", ephemeral=True)
+            return
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        state.processing = True
+        started = time.perf_counter()
+        summary_language = store.get_summary_language(ctx.guild.id, default="ru")
+        await try_send(
+            target_channel,
+            f"Reprocessing latest saved session: `{session_dir.name}` (language `{summary_language}`)...",
+        )
+        try:
+            artifacts = await asyncio.wait_for(
+                processor.reprocess_saved_session(
+                    session_dir=session_dir,
+                    summary_language=summary_language,
+                ),
+                timeout=settings.processing_timeout_seconds,
+            )
+            await try_send(target_channel, f"Reprocess done: `{artifacts.session_dir}`")
+            await try_send_file(
+                target_channel,
+                str(artifacts.full_transcript_txt_path),
+                content="## Full Transcript (attached as .txt)",
+            )
+            await try_send(target_channel, "## AI Session Summary")
+            await send_long(target_channel, artifacts.summary_markdown)
+            logger.info(
+                "[reprocess] command_done guild_id=%s session_dir=%s duration_s=%.3f",
+                ctx.guild.id,
+                session_dir,
+                time.perf_counter() - started,
+            )
+            await ctx.followup.send(f"Reprocessed `{session_dir.name}` successfully.", ephemeral=True)
+        except TimeoutError:
+            await try_send(target_channel, "Reprocess timed out. Check Whisper/LLM availability.")
+            await ctx.followup.send("Reprocess timed out.", ephemeral=True)
+        except Exception as exc:
+            logger.exception("[reprocess] command_failed guild_id=%s session_dir=%s", ctx.guild.id, session_dir)
+            await try_send(target_channel, f"Reprocess failed: `{exc}`")
+            await ctx.followup.send(f"Reprocess failed: `{exc}`", ephemeral=True)
+        finally:
+            state.processing = False
 
     @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
     async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
