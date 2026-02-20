@@ -238,6 +238,13 @@ Optional:
 - `--env-file .env`
 - `--force` (overwrite existing converted directory)
 
+If conversion previously succeeded but Whisper fails with mel-shape errors
+(for example `expected ... 128 ... got ... 80 ...`), re-run conversion with:
+
+```bash
+python scripts/prepare_whisper_ct2_model.py --model <model-id> --quantization float16 --force
+```
+
 ## Slash Commands
 
 - `/chronicle_setup` - set report text channel (dropdown channel picker).

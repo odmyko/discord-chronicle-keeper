@@ -111,6 +111,9 @@ def main() -> int:
         str(output_dir),
         "--quantization",
         args.quantization,
+        "--copy_files",
+        "tokenizer.json",
+        "preprocessor_config.json",
     ]
 
     print("Running:", " ".join(cmd))
@@ -122,6 +125,19 @@ def main() -> int:
     except subprocess.CalledProcessError as exc:
         print(f"Error: model conversion failed with exit code {exc.returncode}.")
         return exc.returncode
+
+    required_files = [
+        output_dir / "model.bin",
+        output_dir / "tokenizer.json",
+        output_dir / "preprocessor_config.json",
+    ]
+    missing_files = [str(p) for p in required_files if not p.exists()]
+    if missing_files:
+        print("Error: conversion finished but required files are missing:")
+        for path in missing_files:
+            print(f"  - {path}")
+        print("Try running again with --force.")
+        return 1
 
     update_env_file(env_path, output_name)
     print(f"Model converted to: {output_dir}")
