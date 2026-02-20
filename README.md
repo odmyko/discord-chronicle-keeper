@@ -102,6 +102,10 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 
 ### Runtime config highlights
 
+- `AUDIO_DUAL_PIPELINE_ENABLED=false` (default): single transcription pass from processed audio.
+- `AUDIO_DUAL_PIPELINE_ENABLED=true`: dual pass:
+  timeline timestamps from raw audio (no VAD), transcript text from processed audio.
+  This improves chronology + ASR quality but increases processing time.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
 - `AUDIO_VAD_ENABLED=false` (default): keep pauses/silence as-is.
@@ -253,6 +257,21 @@ Note: some Hugging Face model repos do not include `tokenizer.json` or
 and warns if `preprocessor_config.json` is missing (this can cause runtime mel-shape
 mismatch in `faster_whisper`).
 
+### Whisper Benchmark (real recorded file)
+
+Use this helper to benchmark your Whisper endpoint on latest recorded `.mp3`
+(prefers `mixed_session.mp3` when present):
+
+```bash
+python scripts/benchmark_whisper.py --whisper-url http://127.0.0.1:9000 --runs 3
+```
+
+Or target a specific file:
+
+```bash
+python scripts/benchmark_whisper.py --audio data/sessions/<guild>/<session>/audio/mixed_session.mp3 --runs 3
+```
+
 ## Slash Commands
 
 - `/chronicle_setup` - set report text channel (dropdown channel picker).
@@ -278,7 +297,8 @@ mismatch in `faster_whisper`).
 - Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
 - Discord file size limits can prevent uploading `.mp3` artifacts in-channel; full files remain on disk.
 - Quality report is heuristic (duration/bitrate/reconnect/rotation counters) and not a full audio QA system.
-- If `AUDIO_VAD_ENABLED=true`, silence trimming can shift perceived per-speaker timing; timeline remains approximate.
+- If `AUDIO_VAD_ENABLED=true` with single-pass mode, silence trimming can shift perceived timing.
+  Use `AUDIO_DUAL_PIPELINE_ENABLED=true` to keep timeline timestamps from raw audio.
 
 ## Versioning
 

@@ -28,6 +28,7 @@ class Settings:
     auto_cleanup_on_start: bool
     retention_days: int
     allow_purge_commands: bool
+    audio_dual_pipeline_enabled: bool
     audio_normalize: bool
     audio_vad_enabled: bool
     audio_target_sample_rate: int
@@ -84,6 +85,7 @@ def load_settings() -> Settings:
         auto_cleanup_on_start=_as_bool(os.getenv("AUTO_CLEANUP_ON_START", "false"), default=False),
         retention_days=int(os.getenv("RETENTION_DAYS", "30")),
         allow_purge_commands=_as_bool(os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False),
+        audio_dual_pipeline_enabled=_as_bool(os.getenv("AUDIO_DUAL_PIPELINE_ENABLED", "false"), default=False),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
         audio_vad_enabled=_as_bool(os.getenv("AUDIO_VAD_ENABLED", "false"), default=False),
         audio_target_sample_rate=int(os.getenv("AUDIO_TARGET_SAMPLE_RATE", "0")),

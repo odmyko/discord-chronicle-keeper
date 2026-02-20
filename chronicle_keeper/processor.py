@@ -67,6 +67,7 @@ class SessionProcessor:
         base_data_dir: Path,
         whisper: WhisperClient,
         llm: LLMClient,
+        audio_dual_pipeline_enabled: bool = False,
         audio_normalize: bool = False,
         audio_vad_enabled: bool = False,
         audio_target_sample_rate: int = 0,
@@ -77,6 +78,7 @@ class SessionProcessor:
         self._base_data_dir = base_data_dir
         self._whisper = whisper
         self._llm = llm
+        self._audio_dual_pipeline_enabled = audio_dual_pipeline_enabled
         self._audio_normalize = audio_normalize
         self._audio_vad_enabled = audio_vad_enabled
         self._audio_target_sample_rate = max(0, audio_target_sample_rate)
@@ -158,22 +160,35 @@ class SessionProcessor:
                     user_id,
                     wav_path.name,
                 )
+                timeline_result = None
+                if self._audio_dual_pipeline_enabled:
+                    logger.debug(
+                        "[processor] transcribe timeline(raw) start speaker=%s file=%s",
+                        speaker_name,
+                        wav_path.name,
+                    )
+                    timeline_result = await self._whisper.transcribe_file_detailed(wav_path)
                 compressed_path = await self._compress_audio(wav_path)
                 logger.debug(
-                    "[processor] transcribe start speaker=%s file=%s",
+                    "[processor] transcribe content(clean) start speaker=%s file=%s",
                     speaker_name,
                     compressed_path.name,
                 )
-                transcript_result = await self._whisper.transcribe_file_detailed(compressed_path)
-                transcript = transcript_result.text
+                content_result = await self._whisper.transcribe_file_detailed(compressed_path)
+                transcript = content_result.text
+                if not transcript and timeline_result is not None:
+                    transcript = timeline_result.text
                 logger.debug(
                     "[processor] transcribe done speaker=%s chars=%s",
                     speaker_name,
                     len(transcript),
                 )
+                timeline_segments = (
+                    timeline_result.segments if timeline_result is not None else content_result.segments
+                )
                 timeline_entries.extend(
                     self._timeline_entries_from_segments(
-                        transcript_result.segments,
+                        timeline_segments,
                         segment_index=segment_index,
                         user_id=int(user_id),
                         speaker_name=speaker_name,

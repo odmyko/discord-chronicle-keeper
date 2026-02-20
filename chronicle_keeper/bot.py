@@ -185,6 +185,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         settings.data_dir,
         whisper,
         llm,
+        audio_dual_pipeline_enabled=settings.audio_dual_pipeline_enabled,
         audio_normalize=settings.audio_normalize,
         audio_vad_enabled=settings.audio_vad_enabled,
         audio_target_sample_rate=settings.audio_target_sample_rate,

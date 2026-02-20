@@ -26,6 +26,7 @@ def test_load_settings_defaults(monkeypatch):
     monkeypatch.setenv("AUDIO_TARGET_SAMPLE_RATE", "0")
     monkeypatch.setenv("AUDIO_TARGET_CHANNELS", "0")
     monkeypatch.setenv("AUDIO_MP3_VBR_QUALITY", "4")
+    monkeypatch.setenv("AUDIO_DUAL_PIPELINE_ENABLED", "false")
     monkeypatch.setenv("AUDIO_VAD_ENABLED", "false")
     monkeypatch.setenv("PUBLISH_PER_SPEAKER_AUDIO", "false")
     # Keep this test deterministic even when local .env exists.
@@ -45,6 +46,7 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.audio_target_sample_rate == 0
     assert settings.audio_target_channels == 0
     assert settings.audio_mp3_vbr_quality == 4
+    assert settings.audio_dual_pipeline_enabled is False
     assert settings.audio_vad_enabled is False
     assert settings.publish_per_speaker_audio is False
     assert settings.llm_base_url.startswith("http://127.0.0.1:")
@@ -56,3 +58,11 @@ def test_load_settings_audio_vad_enabled(monkeypatch):
 
     settings = load_settings()
     assert settings.audio_vad_enabled is True
+
+
+def test_load_settings_audio_dual_pipeline_enabled(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("AUDIO_DUAL_PIPELINE_ENABLED", "true")
+
+    settings = load_settings()
+    assert settings.audio_dual_pipeline_enabled is True
