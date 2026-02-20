@@ -1,1 +1,4 @@
 pytest==8.4.1
+pre-commit==4.3.0
+ruff==0.12.11
+mypy==1.18.1

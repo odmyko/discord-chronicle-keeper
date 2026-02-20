@@ -25,6 +25,12 @@ jobs:
       - name: Compile check
         run: python -m compileall chronicle_keeper
 
+      - name: Run pre-commit checks
+        run: pre-commit run --all-files
+
+      - name: Run mypy
+        run: python -m mypy
+
       - name: Run unit tests
         run: python -m pytest -q tests/test_config.py tests/test_processor.py
 
