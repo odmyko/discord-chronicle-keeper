@@ -6,6 +6,24 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-02-20
+
+### Added
+- `/chronicle_reprocess_last` slash command for one-click reprocessing of the latest saved guild session.
+- Helper script for local Whisper CTranslate2 setup:
+  - `scripts/prepare_whisper_ct2_model.py` converts model and updates `.env`.
+
+### Changed
+- Summary generation tone improved for DnD/TTRPG use:
+  - still deterministic section structure
+  - more narrative, player-facing chronicle style.
+- Whisper CT2 helper hardened:
+  - uses current Python interpreter
+  - validates conversion dependencies
+  - copies only available HF files (`tokenizer.json`, `preprocessor_config.json`)
+  - validates generated artifacts and warns on missing preprocessor config.
+- README updated with CT2 conversion prerequisites and troubleshooting guidance.
+
 ## [0.6.0] - 2026-02-20
 
 ### Added
