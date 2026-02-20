@@ -370,3 +370,8 @@ Security policy and vulnerability reporting: `SECURITY.md`
 
 Support options and channels: `SUPPORT.md`
 
+## Community
+
+- Code of Conduct: `CODE_OF_CONDUCT.md`
+- Production readiness checklist: `PRODUCTION_CHECKLIST.md`
+
