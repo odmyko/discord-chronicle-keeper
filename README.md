@@ -301,6 +301,27 @@ After restore:
 2. Review startup recovery messages in chronicle channels.
 3. Run `/chronicle_cleanup_now` if retention policy should be applied immediately.
 
+## Reprocess Saved Session (CLI)
+
+Use this to rebuild transcript/summary from already recorded audio artifacts:
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --language ru
+```
+
+Alternative form:
+
+```bash
+python -m chronicle_keeper.reprocess --guild-id <guild_id> --session-id <session_id> --language ru
+```
+
+This command reads files from `audio/`, re-runs Whisper + LLM processing, and rewrites:
+- `transcripts/*.md`
+- `full_transcript.md`
+- `full_transcript.txt`
+- `summary.md`
+- `summary_chunks/*.md` (for chunked runs)
+
 ## Testing
 
 Install dev dependencies:

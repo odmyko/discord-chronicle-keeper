@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import re
 from collections import OrderedDict
+from typing import NamedTuple
 
 import discord
 
@@ -40,6 +41,13 @@ class SessionArtifacts:
     summary_markdown: str
     summary_path: Path
     speaker_transcripts: list[SpeakerTranscript]
+
+
+class SavedAudioEntry(NamedTuple):
+    path: Path
+    speaker_name: str
+    user_id: int
+    segment_index: int
 
 
 class SessionProcessor:
@@ -227,6 +235,115 @@ class SessionProcessor:
             speaker_transcripts=speaker_items,
         )
 
+    async def reprocess_saved_session(
+        self,
+        session_dir: Path,
+        summary_language: str = "ru",
+    ) -> SessionArtifacts:
+        audio_dir = session_dir / "audio"
+        transcript_dir = session_dir / "transcripts"
+        summary_chunks_dir = session_dir / "summary_chunks"
+        if not audio_dir.exists() or not audio_dir.is_dir():
+            raise RuntimeError(f"Session audio directory not found: {audio_dir}")
+
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        summary_chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        entries = self._collect_saved_audio_entries(audio_dir)
+        if not entries:
+            raise RuntimeError(f"No supported audio files found in {audio_dir}")
+
+        logger.info(
+            "[reprocess] start session_dir=%s tracks=%s",
+            session_dir,
+            len(entries),
+        )
+
+        speaker_items: list[SpeakerTranscript] = []
+        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
+        for entry in entries:
+            logger.debug(
+                "[reprocess] transcribe start speaker=%s user_id=%s file=%s",
+                entry.speaker_name,
+                entry.user_id,
+                entry.path.name,
+            )
+            transcript = await self._whisper.transcribe_file(entry.path)
+            logger.debug(
+                "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
+                entry.speaker_name,
+                entry.user_id,
+                len(transcript),
+            )
+            transcript_path = transcript_dir / f"{entry.path.stem}.md"
+            transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
+            speaker_items.append(
+                SpeakerTranscript(
+                    user_id=entry.user_id,
+                    speaker_name=entry.speaker_name,
+                    audio_path=entry.path,
+                    transcript=transcript,
+                )
+            )
+            key = (entry.user_id, entry.speaker_name)
+            speaker_transcript_chunks.setdefault(key, []).append(transcript or "_[no speech detected]_")
+
+        merged_items: list[SpeakerTranscript] = []
+        for (user_id, speaker_name), chunks in speaker_transcript_chunks.items():
+            merged_items.append(
+                SpeakerTranscript(
+                    user_id=user_id,
+                    speaker_name=speaker_name,
+                    audio_path=Path(""),
+                    transcript="\n\n".join(chunks).strip(),
+                )
+            )
+        merged_items.sort(key=lambda item: item.speaker_name.lower())
+        full_transcript = self._build_transcript_markdown(merged_items)
+        (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
+        full_transcript_txt = self._build_transcript_text(merged_items)
+        full_transcript_txt_path = session_dir / "full_transcript.txt"
+        full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
+
+        chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
+        if len(chunks) <= 1:
+            summary_markdown = await self._lmstudio.generate_summary(full_transcript, language=summary_language)
+        else:
+            chunk_summaries: list[str] = []
+            for idx, chunk in enumerate(chunks, start=1):
+                chunk_summary_path = summary_chunks_dir / f"chunk_{idx:03d}.md"
+                chunk_summary = await self._lmstudio.generate_chunk_summary(
+                    chunk,
+                    chunk_index=idx,
+                    total_chunks=len(chunks),
+                    language=summary_language,
+                )
+                chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
+                chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
+
+            combined = "\n\n".join(chunk_summaries)
+            (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
+            summary_markdown = await self._lmstudio.combine_chunk_summaries(
+                combined,
+                language=summary_language,
+            )
+
+        summary_path = session_dir / "summary.md"
+        summary_path.write_text(summary_markdown, encoding="utf-8")
+        logger.info(
+            "[reprocess] done session_dir=%s transcript_file=%s",
+            session_dir,
+            full_transcript_txt_path.name,
+        )
+        return SessionArtifacts(
+            session_dir=session_dir,
+            full_transcript=full_transcript,
+            full_transcript_txt_path=full_transcript_txt_path,
+            summary_markdown=summary_markdown,
+            summary_path=summary_path,
+            speaker_transcripts=speaker_items,
+        )
+
     async def _compress_audio(self, wav_path: Path) -> Path:
         mp3_path = wav_path.with_suffix(".mp3")
         ffmpeg_args = [
@@ -274,6 +391,50 @@ class SessionProcessor:
     @staticmethod
     def _write_checkpoint(path: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _parse_saved_audio_filename(path: Path) -> SavedAudioEntry | None:
+        match = re.match(
+            r"^(?P<speaker>.+)_(?P<uid>\d+)(?:_seg(?P<seg>\d{3}))?$",
+            path.stem,
+        )
+        if not match:
+            return None
+        speaker_name = match.group("speaker").replace("_", " ").strip()
+        if not speaker_name:
+            speaker_name = "unknown"
+        try:
+            user_id = int(match.group("uid"))
+        except ValueError:
+            return None
+        segment_index = int(match.group("seg")) if match.group("seg") else 0
+        return SavedAudioEntry(
+            path=path,
+            speaker_name=speaker_name,
+            user_id=user_id,
+            segment_index=segment_index,
+        )
+
+    @classmethod
+    def _collect_saved_audio_entries(cls, audio_dir: Path) -> list[SavedAudioEntry]:
+        supported_ext = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+        entries: list[SavedAudioEntry] = []
+        fallback_index = 0
+        for path in sorted(audio_dir.glob("*")):
+            if not path.is_file() or path.suffix.lower() not in supported_ext:
+                continue
+            parsed = cls._parse_saved_audio_filename(path)
+            if parsed is None:
+                fallback_index += 1
+                parsed = SavedAudioEntry(
+                    path=path,
+                    speaker_name="unknown",
+                    user_id=0,
+                    segment_index=fallback_index,
+                )
+            entries.append(parsed)
+        entries.sort(key=lambda e: (e.user_id, e.speaker_name.lower(), e.segment_index, e.path.name))
+        return entries
 
     @staticmethod
     def _split_transcript_for_summary(text: str, max_chars: int) -> list[str]:
