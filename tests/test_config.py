@@ -27,6 +27,7 @@ def test_load_settings_defaults(monkeypatch):
     monkeypatch.setenv("AUDIO_TARGET_CHANNELS", "0")
     monkeypatch.setenv("AUDIO_MP3_VBR_QUALITY", "4")
     monkeypatch.setenv("AUDIO_VAD_ENABLED", "false")
+    monkeypatch.setenv("PUBLISH_PER_SPEAKER_AUDIO", "false")
     # Keep this test deterministic even when local .env exists.
     monkeypatch.setenv("SUMMARY_CHUNK_CHARS", "14000")
     monkeypatch.setenv("RECORDING_ROTATION_SECONDS", "1800")
@@ -45,6 +46,7 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.audio_target_channels == 0
     assert settings.audio_mp3_vbr_quality == 4
     assert settings.audio_vad_enabled is False
+    assert settings.publish_per_speaker_audio is False
     assert settings.llm_base_url.startswith("http://127.0.0.1:")
 
 

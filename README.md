@@ -121,7 +121,8 @@ Long session processing options:
 - The bot now writes processing checkpoints to `data/sessions/<guild_id>/<session_ts>/processing_state.json`.
 - For very long sessions, chunk summaries are saved in `summary_chunks/` and combined into final `summary.md`.
 - In Discord, full transcript is posted as attached `full_transcript.txt` instead of inline long messages.
-- Bot also attempts to upload recorded speaker `.mp3` files (Discord size limits may apply).
+- Bot posts `mixed_session.mp3` by default (single convenient listening track).
+- Optional per-speaker audio posting is available via `PUBLISH_PER_SPEAKER_AUDIO=true`.
 
 ## Docker
 
@@ -275,7 +276,7 @@ mismatch in `faster_whisper`).
 - Transcription is generated per-user track. Bot now builds an approximate chronological timeline using Whisper segment timestamps, but it is still not a sample-accurate multi-speaker chat log.
 - Large sessions are better posted in parts: the bot already chunks long messages to fit Discord limits.
 - Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
-- Discord file size limits can prevent uploading all `.mp3` artifacts in-channel; full files remain on disk.
+- Discord file size limits can prevent uploading `.mp3` artifacts in-channel; full files remain on disk.
 - Quality report is heuristic (duration/bitrate/reconnect/rotation counters) and not a full audio QA system.
 - If `AUDIO_VAD_ENABLED=true`, silence trimming can shift perceived per-speaker timing; timeline remains approximate.
 

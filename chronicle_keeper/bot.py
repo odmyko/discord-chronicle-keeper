@@ -1307,6 +1307,24 @@ def build_bot(settings: Settings) -> commands.Bot:
                 str(artifacts.full_transcript_txt_path),
                 content="## Full Transcript (attached as .txt)",
             )
+            if artifacts.mixed_audio_path and artifacts.mixed_audio_path.exists():
+                await try_send_file(
+                    target_channel,
+                    str(artifacts.mixed_audio_path),
+                    content="## Mixed Session Audio (.mp3)",
+                )
+            elif settings.publish_per_speaker_audio:
+                mp3_paths = [
+                    str(item.audio_path)
+                    for item in artifacts.speaker_transcripts
+                    if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
+                ]
+                if mp3_paths:
+                    await try_send_files(
+                        target_channel,
+                        mp3_paths,
+                        content="## Audio Tracks (.mp3)",
+                    )
             await try_send(target_channel, "## AI Session Summary")
             await send_long(target_channel, artifacts.summary_markdown)
             logger.info(
@@ -1619,35 +1637,51 @@ def build_bot(settings: Settings) -> commands.Bot:
                         content="## Full Transcript (attached as .txt)",
                     )
 
-                mp3_paths = [
-                    str(item.audio_path)
-                    for item in artifacts.speaker_transcripts
-                    if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
-                ]
-                if mp3_paths:
-                    sent_count = await try_send_files(
+                uploaded_audio_count = 0
+                if artifacts.mixed_audio_path and artifacts.mixed_audio_path.exists():
+                    mixed_sent = await try_send_file(
                         target_channel,
-                        mp3_paths,
-                        content="## Audio Tracks (.mp3)",
+                        str(artifacts.mixed_audio_path),
+                        content="## Mixed Session Audio (.mp3)",
                     )
-                    if sent_count == 0 and target_channel is not fallback_channel:
-                        sent_count = await try_send_files(
+                    if not mixed_sent and target_channel is not fallback_channel:
+                        mixed_sent = await try_send_file(
                             fallback_channel,
+                            str(artifacts.mixed_audio_path),
+                            content="## Mixed Session Audio (.mp3)",
+                        )
+                    uploaded_audio_count = 1 if mixed_sent else 0
+                elif settings.publish_per_speaker_audio:
+                    mp3_paths = [
+                        str(item.audio_path)
+                        for item in artifacts.speaker_transcripts
+                        if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
+                    ]
+                    if mp3_paths:
+                        sent_count = await try_send_files(
+                            target_channel,
                             mp3_paths,
                             content="## Audio Tracks (.mp3)",
                         )
-                    if sent_count < len(mp3_paths):
-                        await try_send(
-                            target_channel,
-                            f"Uploaded {sent_count}/{len(mp3_paths)} mp3 files. "
-                            f"Remaining files are still saved in `{artifacts.session_dir}`.",
-                        )
+                        if sent_count == 0 and target_channel is not fallback_channel:
+                            sent_count = await try_send_files(
+                                fallback_channel,
+                                mp3_paths,
+                                content="## Audio Tracks (.mp3)",
+                            )
+                        uploaded_audio_count = sent_count
+                        if sent_count < len(mp3_paths):
+                            await try_send(
+                                target_channel,
+                                f"Uploaded {sent_count}/{len(mp3_paths)} mp3 files. "
+                                f"Remaining files are still saved in `{artifacts.session_dir}`.",
+                            )
                 logger.info(
                     "[session] processing_done guild_id=%s session_dir=%s transcript_file=%s mp3_files=%s duration_s=%.3f",
                     guild_id,
                     artifacts.session_dir,
                     artifacts.full_transcript_txt_path.name,
-                    len(mp3_paths),
+                    uploaded_audio_count,
                     time.perf_counter() - processing_started,
                 )
                 await try_send(target_channel, "## AI Session Summary")

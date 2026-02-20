@@ -51,6 +51,7 @@ class SessionArtifacts:
     summary_markdown: str
     summary_path: Path
     speaker_transcripts: list[SpeakerTranscript]
+    mixed_audio_path: Path | None
 
 
 class SavedAudioEntry(NamedTuple):
@@ -133,6 +134,7 @@ class SessionProcessor:
         speaker_items: list[SpeakerTranscript] = []
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
         timeline_entries: list[TimelineEntry] = []
+        segment_audio_paths: dict[int, list[Path]] = {}
         segment_index = 0
 
         for sink in valid_sinks:
@@ -187,6 +189,7 @@ class SessionProcessor:
                         transcript=transcript,
                     )
                 )
+                segment_audio_paths.setdefault(segment_index, []).append(compressed_path)
                 key = (int(user_id), speaker_name)
                 speaker_transcript_chunks.setdefault(key, []).append(transcript or "_[no speech detected]_")
                 checkpoint["transcribed_tracks"] = len(speaker_items)
@@ -252,6 +255,7 @@ class SessionProcessor:
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
+        mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
         checkpoint["final_summary_done"] = True
         checkpoint["status"] = "done"
         self._write_checkpoint(checkpoint_path, checkpoint)
@@ -264,6 +268,7 @@ class SessionProcessor:
             summary_markdown=summary_markdown,
             summary_path=summary_path,
             speaker_transcripts=speaker_items,
+            mixed_audio_path=mixed_audio_path,
         )
 
     async def reprocess_saved_session(
@@ -293,6 +298,7 @@ class SessionProcessor:
         speaker_items: list[SpeakerTranscript] = []
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
         timeline_entries: list[TimelineEntry] = []
+        segment_audio_paths: dict[int, list[Path]] = {}
         for entry in entries:
             logger.debug(
                 "[reprocess] transcribe start speaker=%s user_id=%s file=%s",
@@ -326,6 +332,7 @@ class SessionProcessor:
                     transcript=transcript,
                 )
             )
+            segment_audio_paths.setdefault(entry.segment_index, []).append(entry.path)
             key = (entry.user_id, entry.speaker_name)
             speaker_transcript_chunks.setdefault(key, []).append(transcript or "_[no speech detected]_")
 
@@ -374,6 +381,7 @@ class SessionProcessor:
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
+        mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
         logger.info(
             "[reprocess] done session_dir=%s transcript_file=%s",
             session_dir,
@@ -386,6 +394,7 @@ class SessionProcessor:
             summary_markdown=summary_markdown,
             summary_path=summary_path,
             speaker_transcripts=speaker_items,
+            mixed_audio_path=mixed_audio_path,
         )
 
     async def _compress_audio(self, wav_path: Path) -> Path:
@@ -477,6 +486,8 @@ class SessionProcessor:
         for path in sorted(audio_dir.glob("*")):
             if not path.is_file() or path.suffix.lower() not in supported_ext:
                 continue
+            if path.stem.lower() == "mixed_session":
+                continue
             parsed = cls._parse_saved_audio_filename(path)
             if parsed is None:
                 fallback_index += 1
@@ -489,6 +500,110 @@ class SessionProcessor:
             entries.append(parsed)
         entries.sort(key=lambda e: (e.user_id, e.speaker_name.lower(), e.segment_index, e.path.name))
         return entries
+
+    async def _build_mixed_session_audio(
+        self,
+        audio_dir: Path,
+        segment_audio_paths: dict[int, list[Path]],
+    ) -> Path | None:
+        if not segment_audio_paths:
+            return None
+        mixed_output = audio_dir / "mixed_session.mp3"
+        temp_dir = audio_dir / "_mixed_tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        segment_mix_paths: list[Path] = []
+
+        for seg_idx in sorted(segment_audio_paths.keys()):
+            inputs = [p for p in segment_audio_paths[seg_idx] if p.exists()]
+            if not inputs:
+                continue
+            out_path = temp_dir / f"mixed_seg{seg_idx:03d}.mp3"
+            if len(inputs) == 1:
+                ok = await self._transcode_to_mp3(inputs[0], out_path)
+            else:
+                ok = await self._mix_tracks_to_mp3(inputs, out_path)
+            if ok and out_path.exists():
+                segment_mix_paths.append(out_path)
+
+        if not segment_mix_paths:
+            return None
+
+        concat_file = temp_dir / "concat.txt"
+        concat_file.write_text(
+            "\n".join(f"file '{p.as_posix()}'" for p in segment_mix_paths),
+            encoding="utf-8",
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                str(self._audio_mp3_vbr_quality),
+                str(mixed_output),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            logger.warning("[processor] ffmpeg not found in PATH, mixed audio disabled")
+            return None
+        code = await proc.wait()
+        if code == 0 and mixed_output.exists():
+            logger.info("[processor] built mixed session audio: %s", mixed_output.name)
+            return mixed_output
+        logger.warning("[processor] failed to build mixed session audio (code=%s)", code)
+        return None
+
+    async def _transcode_to_mp3(self, input_path: Path, output_path: Path) -> bool:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(input_path),
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                str(self._audio_mp3_vbr_quality),
+                str(output_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return False
+        return (await proc.wait()) == 0 and output_path.exists()
+
+    async def _mix_tracks_to_mp3(self, inputs: list[Path], output_path: Path) -> bool:
+        cmd = ["ffmpeg", "-y"]
+        for path in inputs:
+            cmd.extend(["-i", str(path)])
+        cmd.extend(
+            [
+                "-filter_complex",
+                f"amix=inputs={len(inputs)}:duration=longest:normalize=0",
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                str(self._audio_mp3_vbr_quality),
+                str(output_path),
+            ]
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return False
+        return (await proc.wait()) == 0 and output_path.exists()
 
     @staticmethod
     def _split_transcript_for_summary(text: str, max_chars: int) -> list[str]:

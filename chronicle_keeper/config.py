@@ -33,6 +33,7 @@ class Settings:
     audio_target_sample_rate: int
     audio_target_channels: int
     audio_mp3_vbr_quality: int
+    publish_per_speaker_audio: bool
     data_dir: Path
 
 
@@ -88,5 +89,6 @@ def load_settings() -> Settings:
         audio_target_sample_rate=int(os.getenv("AUDIO_TARGET_SAMPLE_RATE", "0")),
         audio_target_channels=int(os.getenv("AUDIO_TARGET_CHANNELS", "0")),
         audio_mp3_vbr_quality=audio_mp3_vbr_quality,
+        publish_per_speaker_audio=_as_bool(os.getenv("PUBLISH_PER_SPEAKER_AUDIO", "false"), default=False),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
