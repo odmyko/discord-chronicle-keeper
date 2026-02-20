@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import aiohttp
+import re
 
 from .config import Settings
 
 
 class LLMClient:
+    _SUMMARY_SECTIONS = [
+        "Session Summary",
+        "Key Events",
+        "NPCs and Factions",
+        "Open Threads",
+        "Player-Facing Chronicle Post",
+    ]
+
     def __init__(self, settings: Settings) -> None:
         self._base_url = settings.llm_base_url
         self._model = settings.llm_model
@@ -35,6 +44,45 @@ class LLMClient:
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(f"Unexpected LLM response: {body}")
 
+    @classmethod
+    def _empty_section_message(cls, language: str) -> str:
+        messages = {
+            "en": "_No details were produced by the model for this section._",
+            "uk": "_Для цього розділу модель не надала деталей._",
+            "ru": "_Для этого раздела модель не выдала деталей._",
+        }
+        return messages.get(language, messages["ru"])
+
+    @classmethod
+    def _normalize_summary_markdown(cls, raw: str, language: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            text = ""
+
+        # Collect existing top-level sections from model output.
+        section_positions = []
+        for match in re.finditer(r"(?m)^#\s+(.+?)\s*$", text):
+            section_positions.append((match.start(), match.end(), match.group(1).strip()))
+
+        extracted: dict[str, str] = {}
+        for idx, (_, title_end, title) in enumerate(section_positions):
+            next_start = section_positions[idx + 1][0] if idx + 1 < len(section_positions) else len(text)
+            body = text[title_end:next_start].strip()
+            normalized_title = title.lower()
+            for required in cls._SUMMARY_SECTIONS:
+                if normalized_title == required.lower():
+                    extracted[required] = body
+                    break
+
+        fallback_msg = cls._empty_section_message(language)
+        lines: list[str] = []
+        for title in cls._SUMMARY_SECTIONS:
+            lines.append(f"# {title}")
+            body = extracted.get(title, "").strip()
+            lines.append(body if body else fallback_msg)
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
     async def generate_summary(self, transcript_text: str, language: str = "ru") -> str:
         lang = (language or "ru").lower().strip()
         if lang not in {"en", "uk", "ru"}:
@@ -46,17 +94,19 @@ class LLMClient:
             f"Write all output strictly in {language_names[lang]}."
         )
         user_prompt = (
-            "Using the transcript below, generate a markdown response with sections:\n"
-            "1) # Session Summary\n"
-            "2) # Key Events\n"
-            "3) # NPCs and Factions\n"
-            "4) # Open Threads\n"
-            "5) # Player-Facing Chronicle Post\n\n"
+            "Using the transcript below, generate markdown with EXACT top-level headers in this exact order:\n"
+            "# Session Summary\n"
+            "# Key Events\n"
+            "# NPCs and Factions\n"
+            "# Open Threads\n"
+            "# Player-Facing Chronicle Post\n\n"
+            "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
             f"Return all text in {language_names[lang]}.\n\n"
             "Transcript:\n"
             f"{transcript_text}"
         )
-        return await self._chat(system_prompt, user_prompt)
+        raw = await self._chat(system_prompt, user_prompt)
+        return self._normalize_summary_markdown(raw, lang)
 
     async def generate_chunk_summary(
         self,
@@ -95,14 +145,16 @@ class LLMClient:
             f"Write all output strictly in {language_names[lang]}."
         )
         user_prompt = (
-            "Using the chunk summaries below, generate a markdown response with sections:\n"
-            "1) # Session Summary\n"
-            "2) # Key Events\n"
-            "3) # NPCs and Factions\n"
-            "4) # Open Threads\n"
-            "5) # Player-Facing Chronicle Post\n\n"
+            "Using the chunk summaries below, generate markdown with EXACT top-level headers in this exact order:\n"
+            "# Session Summary\n"
+            "# Key Events\n"
+            "# NPCs and Factions\n"
+            "# Open Threads\n"
+            "# Player-Facing Chronicle Post\n\n"
+            "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
             f"Return all text in {language_names[lang]}.\n\n"
             "Chunk summaries:\n"
             f"{chunk_summaries_markdown}"
         )
-        return await self._chat(system_prompt, user_prompt)
+        raw = await self._chat(system_prompt, user_prompt)
+        return self._normalize_summary_markdown(raw, lang)

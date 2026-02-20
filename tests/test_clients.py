@@ -120,3 +120,30 @@ def test_llm_raises_on_unexpected_shape() -> None:
             await runner.cleanup()
 
     asyncio.run(_run())
+
+
+def test_llm_summary_normalizes_missing_sections() -> None:
+    async def _run() -> None:
+        async def llm_handler(request: web.Request) -> web.Response:
+            return web.json_response(
+                {"choices": [{"message": {"content": "Only one loose paragraph without headers."}}]}
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", llm_handler)
+        runner, port = await _run_server(app)
+        try:
+            client = LLMClient(_make_settings(port))
+            summary = await client.generate_summary("hello", language="ru")
+            for header in (
+                "# Session Summary",
+                "# Key Events",
+                "# NPCs and Factions",
+                "# Open Threads",
+                "# Player-Facing Chronicle Post",
+            ):
+                assert header in summary
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(_run())
