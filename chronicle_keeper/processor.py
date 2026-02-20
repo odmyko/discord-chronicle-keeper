@@ -57,12 +57,18 @@ class SessionProcessor:
         whisper: WhisperClient,
         lmstudio: LMStudioClient,
         audio_normalize: bool = False,
+        audio_target_sample_rate: int = 0,
+        audio_target_channels: int = 0,
+        audio_mp3_vbr_quality: int = 4,
         summary_chunk_chars: int = 14000,
     ) -> None:
         self._base_data_dir = base_data_dir
         self._whisper = whisper
         self._lmstudio = lmstudio
         self._audio_normalize = audio_normalize
+        self._audio_target_sample_rate = max(0, audio_target_sample_rate)
+        self._audio_target_channels = max(0, audio_target_channels)
+        self._audio_mp3_vbr_quality = min(9, max(0, audio_mp3_vbr_quality))
         self._summary_chunk_chars = max(4000, summary_chunk_chars)
 
     async def process_sink(
@@ -352,6 +358,10 @@ class SessionProcessor:
             "-i",
             str(wav_path),
         ]
+        if self._audio_target_channels > 0:
+            ffmpeg_args.extend(["-ac", str(self._audio_target_channels)])
+        if self._audio_target_sample_rate > 0:
+            ffmpeg_args.extend(["-ar", str(self._audio_target_sample_rate)])
         if self._audio_normalize:
             ffmpeg_args.extend(
                 [
@@ -364,7 +374,7 @@ class SessionProcessor:
                 "-codec:a",
                 "libmp3lame",
                 "-q:a",
-                "4",
+                str(self._audio_mp3_vbr_quality),
                 str(mp3_path),
             ]
         )

@@ -35,4 +35,7 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.auto_cleanup_on_start is False
     assert settings.retention_days == 30
     assert settings.allow_purge_commands is False
+    assert settings.audio_target_sample_rate == 0
+    assert settings.audio_target_channels == 0
+    assert settings.audio_mp3_vbr_quality == 4
     assert settings.lmstudio_base_url.startswith("http://127.0.0.1:")

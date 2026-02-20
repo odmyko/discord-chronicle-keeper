@@ -29,6 +29,9 @@ class Settings:
     retention_days: int
     allow_purge_commands: bool
     audio_normalize: bool
+    audio_target_sample_rate: int
+    audio_target_channels: int
+    audio_mp3_vbr_quality: int
     data_dir: Path
 
 
@@ -53,6 +56,11 @@ def load_settings() -> Settings:
     model_runner_name = os.getenv("MODEL_RUNNER_MODEL", "").strip()
     lmstudio_base_url = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
     lmstudio_model = os.getenv("LMSTUDIO_MODEL", "local-model").strip()
+    audio_mp3_vbr_quality = int(os.getenv("AUDIO_MP3_VBR_QUALITY", "4"))
+    if audio_mp3_vbr_quality < 0:
+        audio_mp3_vbr_quality = 0
+    if audio_mp3_vbr_quality > 9:
+        audio_mp3_vbr_quality = 9
 
     return Settings(
         discord_bot_token=token,
@@ -75,5 +83,8 @@ def load_settings() -> Settings:
         retention_days=int(os.getenv("RETENTION_DAYS", "30")),
         allow_purge_commands=_as_bool(os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
+        audio_target_sample_rate=int(os.getenv("AUDIO_TARGET_SAMPLE_RATE", "0")),
+        audio_target_channels=int(os.getenv("AUDIO_TARGET_CHANNELS", "0")),
+        audio_mp3_vbr_quality=audio_mp3_vbr_quality,
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
