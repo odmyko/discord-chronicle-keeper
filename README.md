@@ -219,6 +219,19 @@ Restart compose after changing model settings:
 docker compose up -d --build
 ```
 
+Helper script (converts + updates `.env` automatically):
+
+```bash
+python scripts/prepare_whisper_ct2_model.py \
+  --model anuragshas/whisper-large-v2-uk \
+  --quantization float16
+```
+
+Optional:
+- `--output-name whisper-large-v2-uk`
+- `--env-file .env`
+- `--force` (overwrite existing converted directory)
+
 ## Slash Commands
 
 - `/chronicle_setup` - set report text channel (dropdown channel picker).
