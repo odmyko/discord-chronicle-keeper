@@ -6,6 +6,7 @@ import logging
 import re
 import shutil
 import struct
+import time
 from typing import Iterable
 
 import discord
@@ -326,36 +327,72 @@ def build_bot(settings: Settings) -> commands.Bot:
                     shutil.rmtree(session_dir)
                     removed_sessions += 1
                     removed_bytes += size
-                except OSError:
+                except OSError as exc:
+                    logger.warning(
+                        "[cleanup] failed_remove session_dir=%s error=%s",
+                        session_dir,
+                        exc,
+                    )
                     continue
         return removed_sessions, removed_bytes
 
     async def run_startup_cleanup() -> None:
         if not settings.auto_cleanup_enabled or not settings.auto_cleanup_on_start:
-            return
-        removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
-        if removed_sessions > 0:
             logger.info(
-                "[cleanup] removed_sessions=%s removed_bytes=%s retention_days=%s",
-                removed_sessions,
-                removed_bytes,
-                settings.retention_days,
+                "[cleanup] startup_skip auto_cleanup_enabled=%s auto_cleanup_on_start=%s",
+                settings.auto_cleanup_enabled,
+                settings.auto_cleanup_on_start,
             )
+            return
+        started = time.perf_counter()
+        logger.info(
+            "[cleanup] startup_begin retention_days=%s data_dir=%s",
+            settings.retention_days,
+            settings.data_dir,
+        )
+        removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
+        duration_s = time.perf_counter() - started
+        logger.info(
+            "[cleanup] startup_done removed_sessions=%s removed_bytes=%s retention_days=%s duration_s=%.3f",
+            removed_sessions,
+            removed_bytes,
+            settings.retention_days,
+            duration_s,
+        )
 
     async def recover_unfinished_sessions() -> None:
         if not settings.recovery_auto_post_partial:
+            logger.info("[recovery] startup_skip recovery_auto_post_partial=%s", settings.recovery_auto_post_partial)
             return
 
         sessions_root = settings.data_dir / "sessions"
         if not sessions_root.exists():
+            logger.info("[recovery] startup_skip reason=no_sessions_root path=%s", sessions_root)
             return
+
+        started = time.perf_counter()
+        max_to_post = max(1, settings.recovery_max_sessions)
+        scanned_guild_dirs = 0
+        scanned_session_dirs = 0
+        skipped_done = 0
+        skipped_already_posted = 0
+        skipped_missing_checkpoint = 0
+        skipped_invalid_checkpoint = 0
+        skipped_no_guild = 0
+        skipped_no_channel = 0
+        logger.info(
+            "[recovery] startup_begin max_sessions=%s sessions_root=%s",
+            max_to_post,
+            sessions_root,
+        )
 
         posted_count = 0
         for guild_dir in sorted(sessions_root.iterdir(), reverse=True):
-            if posted_count >= max(1, settings.recovery_max_sessions):
+            if posted_count >= max_to_post:
                 break
             if not guild_dir.is_dir():
                 continue
+            scanned_guild_dirs += 1
             try:
                 guild_id = int(guild_dir.name)
             except ValueError:
@@ -363,34 +400,47 @@ def build_bot(settings: Settings) -> commands.Bot:
 
             guild = bot.get_guild(guild_id)
             if guild is None:
+                skipped_no_guild += 1
                 continue
 
             channel_id = store.get_chronicle_channel(guild_id)
             if channel_id is None:
+                skipped_no_channel += 1
                 continue
             maybe_channel = guild.get_channel(channel_id)
             if not isinstance(maybe_channel, discord.TextChannel):
+                skipped_no_channel += 1
                 continue
             chronicle_channel = maybe_channel
 
             for session_dir in sorted(guild_dir.iterdir(), reverse=True):
-                if posted_count >= max(1, settings.recovery_max_sessions):
+                if posted_count >= max_to_post:
                     break
                 if not session_dir.is_dir():
                     continue
+                scanned_session_dirs += 1
 
                 checkpoint_path = session_dir / "processing_state.json"
                 if not checkpoint_path.exists():
+                    skipped_missing_checkpoint += 1
                     continue
 
                 checkpoint = load_json_file(str(checkpoint_path))
                 if not checkpoint:
+                    skipped_invalid_checkpoint += 1
                     continue
                 if checkpoint.get("status") == "done":
+                    skipped_done += 1
                     continue
                 if checkpoint.get("recovery_posted"):
+                    skipped_already_posted += 1
                     continue
 
+                logger.info(
+                    "[recovery] posting_partial guild_id=%s session_dir=%s",
+                    guild_id,
+                    session_dir,
+                )
                 await try_send(
                     chronicle_channel,
                     (
@@ -426,6 +476,29 @@ def build_bot(settings: Settings) -> commands.Bot:
                 checkpoint["recovery_posted_at_utc"] = datetime.now(UTC).isoformat()
                 save_json_file(str(checkpoint_path), checkpoint)
                 posted_count += 1
+                logger.info(
+                    "[recovery] posted_partial guild_id=%s session_dir=%s artifacts=%s posted_count=%s",
+                    guild_id,
+                    session_dir,
+                    len(artifact_paths),
+                    posted_count,
+                )
+        duration_s = time.perf_counter() - started
+        logger.info(
+            "[recovery] startup_done posted=%s scanned_guild_dirs=%s scanned_session_dirs=%s "
+            "skipped_done=%s skipped_already_posted=%s skipped_missing_checkpoint=%s "
+            "skipped_invalid_checkpoint=%s skipped_no_guild=%s skipped_no_channel=%s duration_s=%.3f",
+            posted_count,
+            scanned_guild_dirs,
+            scanned_session_dirs,
+            skipped_done,
+            skipped_already_posted,
+            skipped_missing_checkpoint,
+            skipped_invalid_checkpoint,
+            skipped_no_guild,
+            skipped_no_channel,
+            duration_s,
+        )
 
     async def wait_voice_ready(voice_client: discord.VoiceClient, timeout_s: float = 20.0) -> bool:
         checks = max(1, int(timeout_s * 10))
@@ -654,7 +727,17 @@ def build_bot(settings: Settings) -> commands.Bot:
         if not settings.auto_cleanup_enabled:
             await ctx.respond("Cleanup is disabled (`AUTO_CLEANUP_ENABLED=false`).", ephemeral=True)
             return
+        started = time.perf_counter()
         removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
+        duration_s = time.perf_counter() - started
+        logger.info(
+            "[cleanup] manual_done guild_id=%s removed_sessions=%s removed_bytes=%s retention_days=%s duration_s=%.3f",
+            ctx.guild.id if ctx.guild else "none",
+            removed_sessions,
+            removed_bytes,
+            settings.retention_days,
+            duration_s,
+        )
         await ctx.respond(
             (
                 f"Cleanup done.\n"
@@ -887,6 +970,12 @@ def build_bot(settings: Settings) -> commands.Bot:
         if voice_channel is None:
             await ctx.followup.send("Join a voice channel first.", ephemeral=True)
             return
+        logger.info(
+            "[session] start_requested guild_id=%s requested_by=%s voice_channel_id=%s",
+            ctx.guild.id,
+            ctx.user.id,
+            voice_channel.id,
+        )
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         if state.sink is not None:
@@ -970,6 +1059,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 return
 
             state.processing = True
+            processing_started = time.perf_counter()
             try:
                 if not state.segment_sinks:
                     sent_no_audio = await try_send(
@@ -986,6 +1076,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                 if not sent and target_channel is not fallback_channel:
                     await try_send(fallback_channel, "Processing recording: Whisper transcription + local LLM summary...")
                 summary_language = store.get_summary_language(guild_id, default="ru")
+                logger.info(
+                    "[session] processing_begin guild_id=%s segments=%s language=%s timeout_s=%s",
+                    guild_id,
+                    len(state.segment_sinks or []),
+                    summary_language,
+                    settings.processing_timeout_seconds,
+                )
                 artifacts = await asyncio.wait_for(
                     processor.process_sinks(guild, state.segment_sinks, summary_language=summary_language),
                     timeout=settings.processing_timeout_seconds,
@@ -1030,6 +1127,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                             f"Uploaded {sent_count}/{len(mp3_paths)} mp3 files. "
                             f"Remaining files are still saved in `{artifacts.session_dir}`.",
                         )
+                logger.info(
+                    "[session] processing_done guild_id=%s session_dir=%s transcript_file=%s mp3_files=%s duration_s=%.3f",
+                    guild_id,
+                    artifacts.session_dir,
+                    artifacts.full_transcript_txt_path.name,
+                    len(mp3_paths),
+                    time.perf_counter() - processing_started,
+                )
                 await try_send(target_channel, "## AI Session Summary")
                 try:
                     await send_long(target_channel, artifacts.summary_markdown)
@@ -1037,6 +1142,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                     if target_channel is not fallback_channel:
                         await send_long(fallback_channel, artifacts.summary_markdown)
             except TimeoutError:
+                logger.warning(
+                    "[session] processing_timeout guild_id=%s timeout_s=%s",
+                    guild_id,
+                    settings.processing_timeout_seconds,
+                )
                 await try_send(
                     fallback_channel,
                     "Processing timed out. Check Whisper/LLM availability and bot logs.",
@@ -1061,14 +1171,28 @@ def build_bot(settings: Settings) -> commands.Bot:
             fallback_channel: discord.abc.Messageable,
         ) -> None:
             if settings.recording_rotation_seconds <= 0:
+                logger.info("[rotation] disabled guild_id=%s", guild_id)
                 return
+            logger.info(
+                "[rotation] loop_started guild_id=%s interval_s=%s",
+                guild_id,
+                settings.recording_rotation_seconds,
+            )
             while True:
                 await asyncio.sleep(settings.recording_rotation_seconds)
                 state = guild_state.setdefault(guild_id, GuildRecordingState())
                 if state.sink is None or state.processing or state.finalizing:
+                    logger.info(
+                        "[rotation] loop_stopped guild_id=%s sink=%s processing=%s finalizing=%s",
+                        guild_id,
+                        state.sink is not None,
+                        state.processing,
+                        state.finalizing,
+                    )
                     return
                 guild = bot.get_guild(guild_id)
                 if guild is None or guild.voice_client is None:
+                    logger.warning("[rotation] skip guild_id=%s reason=voice_client_missing", guild_id)
                     continue
                 await try_send(
                     fallback_channel,
@@ -1085,6 +1209,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 try:
                     guild.voice_client.stop_recording()
                 except Exception as exc:
+                    logger.exception("[rotation] stop_recording_failed guild_id=%s", guild_id)
                     await try_send(
                         fallback_channel,
                         f"Rotation trigger failed: `{exc}`",
@@ -1096,14 +1221,26 @@ def build_bot(settings: Settings) -> commands.Bot:
             fallback_channel: discord.abc.Messageable,
         ) -> None:
             missed_checks = 0
+            logger.info(
+                "[voice-health] monitor_started guild_id=%s target_voice_channel_id=%s",
+                guild_id,
+                target_voice_channel.id,
+            )
             while True:
                 await asyncio.sleep(12.0)
                 state = guild_state.setdefault(guild_id, GuildRecordingState())
                 if state.sink is None or state.processing:
+                    logger.info(
+                        "[voice-health] monitor_stopped guild_id=%s sink=%s processing=%s",
+                        guild_id,
+                        state.sink is not None,
+                        state.processing,
+                    )
                     return
 
                 guild = bot.get_guild(guild_id)
                 if guild is None:
+                    logger.warning("[voice-health] monitor_stopped guild_id=%s reason=guild_missing", guild_id)
                     return
 
                 voice_client = guild.voice_client
@@ -1121,6 +1258,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 if missed_checks < 3:
                     continue
                 missed_checks = 0
+                logger.warning(
+                    "[voice-health] unstable guild_id=%s target_voice_channel_id=%s",
+                    guild_id,
+                    target_voice_channel.id,
+                )
 
                 await try_send(
                     fallback_channel,
@@ -1143,7 +1285,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                         fallback_channel,
                         "Voice connection recovered. Recording resumed.",
                     )
+                    logger.info("[voice-health] recovered guild_id=%s", guild_id)
                 except Exception as exc:
+                    logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
                     await try_send(
                         fallback_channel,
                         f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
