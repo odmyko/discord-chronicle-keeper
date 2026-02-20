@@ -6,6 +6,28 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-20
+
+### Added
+- Recorder health and operational features:
+  - `/chronicle_status` command with runtime counters and connection state
+  - post-session recording quality report (duration/bitrate/sample-rate/reconnect/rotation counters)
+- Configurable speech-focused MP3 output profile:
+  - `AUDIO_TARGET_CHANNELS`
+  - `AUDIO_TARGET_SAMPLE_RATE`
+  - `AUDIO_MP3_VBR_QUALITY`
+- Client negative-path coverage in tests:
+  - Whisper HTTP error behavior
+  - LLM HTTP/malformed response behavior
+- Community/operations docs:
+  - `CODE_OF_CONDUCT.md`
+  - `PRODUCTION_CHECKLIST.md`
+
+### Changed
+- Migrated LLM integration naming to generic `LLM_*` configuration and `LLMClient` terminology.
+- Updated `.env.example` and README to reflect generic OpenAI-compatible LLM endpoint usage.
+- CI unit test step now includes client failure-path tests.
+
 ## [0.5.0] - 2026-02-20
 
 ### Added
