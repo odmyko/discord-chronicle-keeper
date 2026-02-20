@@ -13,3 +13,11 @@ repos:
     hooks:
       - id: ruff-check
       - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: repo-hygiene
+        name: repo-hygiene
+        entry: python scripts/check_repo_hygiene.py
+        language: system
+        pass_filenames: false

@@ -320,6 +320,7 @@ Run checks from repository root:
 Linux / WSL:
 ```bash
 pre-commit run --all-files
+python scripts/check_repo_hygiene.py
 python -m compileall chronicle_keeper
 python -m mypy
 python -m pytest -q
@@ -328,6 +329,7 @@ python -m pytest -q
 Windows PowerShell:
 ```powershell
 pre-commit run --all-files
+python scripts/check_repo_hygiene.py
 python -m compileall chronicle_keeper
 python -m mypy
 python -m pytest -q
