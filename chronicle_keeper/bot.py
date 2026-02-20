@@ -8,7 +8,7 @@ import re
 import shutil
 import struct
 import time
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 import discord
 from discord.ext import commands
@@ -24,6 +24,7 @@ from .whisper_client import WhisperClient
 
 DISCORD_SAFE_LIMIT = 1900
 VoiceLikeChannel = discord.VoiceChannel
+DoneCallback = Callable[[discord.sinks.Sink, discord.abc.Messageable, int], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +63,8 @@ class GuildRecordingState:
     reconnect_attempts: int = 0
     reconnect_successes: int = 0
     reconnect_failures: int = 0
+    done_callback: DoneCallback | None = None
+    fallback_channel: discord.abc.Messageable | None = None
 
 
 def build_bot(settings: Settings) -> commands.Bot:
@@ -653,8 +656,8 @@ def build_bot(settings: Settings) -> commands.Bot:
     async def start_recording_with_retry(
         voice_client: discord.VoiceClient,
         sink: discord.sinks.Sink,
-        done_cb,
-        text_channel: discord.abc.GuildChannel,
+        done_cb: DoneCallback,
+        text_channel: discord.abc.Messageable,
         guild_id: int,
         timeout_s: float = 90.0,
     ) -> None:
@@ -670,6 +673,140 @@ def build_bot(settings: Settings) -> commands.Bot:
         if last_error is not None:
             raise last_error
         raise RuntimeError("Failed to start recording for unknown reason.")
+
+    async def rotation_loop(
+        guild_id: int,
+        fallback_channel: discord.abc.Messageable,
+        done_cb: DoneCallback,
+    ) -> None:
+        if settings.recording_rotation_seconds <= 0:
+            logger.info("[rotation] disabled guild_id=%s", guild_id)
+            return
+        logger.info(
+            "[rotation] loop_started guild_id=%s interval_s=%s",
+            guild_id,
+            settings.recording_rotation_seconds,
+        )
+        while True:
+            await asyncio.sleep(settings.recording_rotation_seconds)
+            state = guild_state.setdefault(guild_id, GuildRecordingState())
+            if state.sink is None or state.processing or state.finalizing:
+                logger.info(
+                    "[rotation] loop_stopped guild_id=%s sink=%s processing=%s finalizing=%s",
+                    guild_id,
+                    state.sink is not None,
+                    state.processing,
+                    state.finalizing,
+                )
+                return
+            guild = bot.get_guild(guild_id)
+            if guild is None or guild.voice_client is None:
+                logger.warning("[rotation] skip guild_id=%s reason=voice_client_missing", guild_id)
+                continue
+            await try_send(
+                fallback_channel,
+                "Rotating recording segment...",
+            )
+            upsert_active_session(
+                guild_id,
+                status="rotating",
+                voice_channel_id=state.voice_channel_id,
+                chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                segment_count=len(state.segment_sinks or []),
+                finalizing=False,
+            )
+            try:
+                state.rotation_triggered += 1
+                guild.voice_client.stop_recording()
+            except Exception as exc:
+                state.rotation_failed += 1
+                logger.exception("[rotation] stop_recording_failed guild_id=%s", guild_id)
+                await try_send(
+                    fallback_channel,
+                    f"Rotation trigger failed: `{exc}`",
+                )
+
+    async def monitor_voice_health(
+        guild_id: int,
+        target_voice_channel: VoiceLikeChannel,
+        fallback_channel: discord.abc.Messageable,
+        done_cb: DoneCallback,
+    ) -> None:
+        missed_checks = 0
+        logger.info(
+            "[voice-health] monitor_started guild_id=%s target_voice_channel_id=%s",
+            guild_id,
+            target_voice_channel.id,
+        )
+        while True:
+            await asyncio.sleep(12.0)
+            state = guild_state.setdefault(guild_id, GuildRecordingState())
+            if state.sink is None or state.processing:
+                logger.info(
+                    "[voice-health] monitor_stopped guild_id=%s sink=%s processing=%s",
+                    guild_id,
+                    state.sink is not None,
+                    state.processing,
+                )
+                return
+
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                logger.warning("[voice-health] monitor_stopped guild_id=%s reason=guild_missing", guild_id)
+                return
+
+            voice_client = guild.voice_client
+            healthy = (
+                voice_client is not None
+                and voice_client.is_connected()
+                and voice_client.channel is not None
+                and voice_client.channel.id == target_voice_channel.id
+            )
+            if healthy:
+                missed_checks = 0
+                continue
+
+            missed_checks += 1
+            if missed_checks < 3:
+                continue
+            missed_checks = 0
+            logger.warning(
+                "[voice-health] unstable guild_id=%s target_voice_channel_id=%s",
+                guild_id,
+                target_voice_channel.id,
+            )
+
+            await try_send(
+                fallback_channel,
+                "Voice connection looks unstable. Attempting automatic reconnect...",
+            )
+            try:
+                state.reconnect_attempts += 1
+                recovered_client = await connect_voice_with_retry(
+                    guild, target_voice_channel, attempts=3
+                )
+                await asyncio.sleep(1.5)
+                await start_recording_with_retry(
+                    voice_client=recovered_client,
+                    sink=state.sink,
+                    done_cb=done_cb,
+                    text_channel=fallback_channel,
+                    guild_id=guild_id,
+                    timeout_s=20.0,
+                )
+                await try_send(
+                    fallback_channel,
+                    "Voice connection recovered. Recording resumed.",
+                )
+                state.reconnect_successes += 1
+                logger.info("[voice-health] recovered guild_id=%s", guild_id)
+            except Exception as exc:
+                state.reconnect_failures += 1
+                logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
+                await try_send(
+                    fallback_channel,
+                    f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
+                )
 
     async def connect_voice_with_retry(
         guild: discord.Guild,
@@ -1151,6 +1288,99 @@ def build_bot(settings: Settings) -> commands.Bot:
         finally:
             state.processing = False
 
+    @bot.slash_command(
+        name="chronicle_reconnect",
+        description="Force reconnect voice and try to resume recording",
+    )
+    async def chronicle_reconnect(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+        await ctx.defer(ephemeral=True)
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        target_channel: VoiceLikeChannel | None = None
+        if state.voice_channel_id is not None:
+            target_channel = _as_voice_like(ctx.guild.get_channel(state.voice_channel_id))
+        if target_channel is None:
+            configured = store.get_voice_channel(ctx.guild.id)
+            if configured is not None:
+                target_channel = _as_voice_like(ctx.guild.get_channel(configured))
+        if target_channel is None:
+            target_channel = await resolve_invoking_voice_channel(ctx)
+        if target_channel is None:
+            await ctx.followup.send(
+                "Could not resolve target voice channel. Use /chronicle_setup_voice_here first.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if ctx.guild.voice_client is not None:
+                await ctx.guild.voice_client.disconnect(force=True)
+                await asyncio.sleep(0.5)
+
+            voice_client = await connect_voice_with_retry(ctx.guild, target_channel, attempts=3)
+            if not await wait_voice_ready(voice_client, timeout_s=20.0):
+                raise RuntimeError("Voice connection did not become ready in time.")
+
+            resumed = False
+            if (
+                state.sink is not None
+                and state.done_callback is not None
+                and state.fallback_channel is not None
+                and not state.processing
+                and not state.finalizing
+            ):
+                await start_recording_with_retry(
+                    voice_client=voice_client,
+                    sink=state.sink,
+                    done_cb=state.done_callback,
+                    text_channel=state.fallback_channel,
+                    guild_id=ctx.guild.id,
+                    timeout_s=20.0,
+                )
+                stop_background_tasks(state)
+                state.health_task = asyncio.create_task(
+                    monitor_voice_health(
+                        ctx.guild.id,
+                        target_channel,
+                        state.fallback_channel,
+                        state.done_callback,
+                    )
+                )
+                state.rotation_task = asyncio.create_task(
+                    rotation_loop(
+                        ctx.guild.id,
+                        state.fallback_channel,
+                        state.done_callback,
+                    )
+                )
+                state.voice_channel_id = target_channel.id
+                upsert_active_session(
+                    ctx.guild.id,
+                    status="recording",
+                    voice_channel_id=target_channel.id,
+                    chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+                    segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                    finalizing=False,
+                )
+                resumed = True
+
+            if resumed:
+                await ctx.followup.send(
+                    f"Reconnected to {target_channel.mention} and resumed recording.",
+                    ephemeral=True,
+                )
+            else:
+                await ctx.followup.send(
+                    f"Reconnected to {target_channel.mention}. Use /chronicle_start to start recording.",
+                    ephemeral=True,
+                )
+        except Exception as exc:
+            logger.exception("[reconnect] manual_failed guild_id=%s", ctx.guild.id)
+            await ctx.followup.send(f"Manual reconnect failed: `{exc}`", ephemeral=True)
+
     @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
     async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
@@ -1415,138 +1645,6 @@ def build_bot(settings: Settings) -> commands.Bot:
                 if guild and guild.voice_client:
                     await guild.voice_client.disconnect(force=False)
 
-        async def rotation_loop(
-            guild_id: int,
-            fallback_channel: discord.abc.Messageable,
-        ) -> None:
-            if settings.recording_rotation_seconds <= 0:
-                logger.info("[rotation] disabled guild_id=%s", guild_id)
-                return
-            logger.info(
-                "[rotation] loop_started guild_id=%s interval_s=%s",
-                guild_id,
-                settings.recording_rotation_seconds,
-            )
-            while True:
-                await asyncio.sleep(settings.recording_rotation_seconds)
-                state = guild_state.setdefault(guild_id, GuildRecordingState())
-                if state.sink is None or state.processing or state.finalizing:
-                    logger.info(
-                        "[rotation] loop_stopped guild_id=%s sink=%s processing=%s finalizing=%s",
-                        guild_id,
-                        state.sink is not None,
-                        state.processing,
-                        state.finalizing,
-                    )
-                    return
-                guild = bot.get_guild(guild_id)
-                if guild is None or guild.voice_client is None:
-                    logger.warning("[rotation] skip guild_id=%s reason=voice_client_missing", guild_id)
-                    continue
-                await try_send(
-                    fallback_channel,
-                    "Rotating recording segment...",
-                )
-                upsert_active_session(
-                    guild_id,
-                    status="rotating",
-                    voice_channel_id=state.voice_channel_id,
-                    chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                    segment_count=len(state.segment_sinks or []),
-                    finalizing=False,
-                )
-                try:
-                    state.rotation_triggered += 1
-                    guild.voice_client.stop_recording()
-                except Exception as exc:
-                    state.rotation_failed += 1
-                    logger.exception("[rotation] stop_recording_failed guild_id=%s", guild_id)
-                    await try_send(
-                        fallback_channel,
-                        f"Rotation trigger failed: `{exc}`",
-                    )
-
-        async def monitor_voice_health(
-            guild_id: int,
-            target_voice_channel: VoiceLikeChannel,
-            fallback_channel: discord.abc.Messageable,
-        ) -> None:
-            missed_checks = 0
-            logger.info(
-                "[voice-health] monitor_started guild_id=%s target_voice_channel_id=%s",
-                guild_id,
-                target_voice_channel.id,
-            )
-            while True:
-                await asyncio.sleep(12.0)
-                state = guild_state.setdefault(guild_id, GuildRecordingState())
-                if state.sink is None or state.processing:
-                    logger.info(
-                        "[voice-health] monitor_stopped guild_id=%s sink=%s processing=%s",
-                        guild_id,
-                        state.sink is not None,
-                        state.processing,
-                    )
-                    return
-
-                guild = bot.get_guild(guild_id)
-                if guild is None:
-                    logger.warning("[voice-health] monitor_stopped guild_id=%s reason=guild_missing", guild_id)
-                    return
-
-                voice_client = guild.voice_client
-                healthy = (
-                    voice_client is not None
-                    and voice_client.is_connected()
-                    and voice_client.channel is not None
-                    and voice_client.channel.id == target_voice_channel.id
-                )
-                if healthy:
-                    missed_checks = 0
-                    continue
-
-                missed_checks += 1
-                if missed_checks < 3:
-                    continue
-                missed_checks = 0
-                logger.warning(
-                    "[voice-health] unstable guild_id=%s target_voice_channel_id=%s",
-                    guild_id,
-                    target_voice_channel.id,
-                )
-
-                await try_send(
-                    fallback_channel,
-                    "Voice connection looks unstable. Attempting automatic reconnect...",
-                )
-                try:
-                    state.reconnect_attempts += 1
-                    recovered_client = await connect_voice_with_retry(
-                        guild, target_voice_channel, attempts=3
-                    )
-                    await asyncio.sleep(1.5)
-                    await start_recording_with_retry(
-                        voice_client=recovered_client,
-                        sink=state.sink,
-                        done_cb=on_finished,
-                        text_channel=fallback_channel,
-                        guild_id=guild_id,
-                        timeout_s=20.0,
-                    )
-                    await try_send(
-                        fallback_channel,
-                        "Voice connection recovered. Recording resumed.",
-                    )
-                    state.reconnect_successes += 1
-                    logger.info("[voice-health] recovered guild_id=%s", guild_id)
-                except Exception as exc:
-                    state.reconnect_failures += 1
-                    logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
-                    await try_send(
-                        fallback_channel,
-                        f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
-                    )
-
         try:
             voice_client = await connect_voice_with_retry(ctx.guild, voice_channel)
 
@@ -1562,11 +1660,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                 guild_id=ctx.guild.id,
             )
             state.voice_channel_id = voice_channel.id
+            state.done_callback = on_finished
+            state.fallback_channel = ctx.channel
             state.health_task = asyncio.create_task(
-                monitor_voice_health(ctx.guild.id, voice_channel, ctx.channel)
+                monitor_voice_health(ctx.guild.id, voice_channel, ctx.channel, on_finished)
             )
             state.rotation_task = asyncio.create_task(
-                rotation_loop(ctx.guild.id, ctx.channel)
+                rotation_loop(ctx.guild.id, ctx.channel, on_finished)
             )
             upsert_active_session(
                 ctx.guild.id,
@@ -1581,6 +1681,8 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.voice_channel_id = None
             state.finalizing = False
             state.started_at_utc = None
+            state.done_callback = None
+            state.fallback_channel = None
             stop_background_tasks(state)
             clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
@@ -1596,6 +1698,8 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.voice_channel_id = None
             state.finalizing = False
             state.started_at_utc = None
+            state.done_callback = None
+            state.fallback_channel = None
             stop_background_tasks(state)
             clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
@@ -1644,6 +1748,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.finalizing = False
         state.voice_channel_id = None
         state.started_at_utc = None
+        state.done_callback = None
+        state.fallback_channel = None
         stop_background_tasks(state)
         clear_active_session(ctx.guild.id)
         await ctx.respond("Disconnected from voice channel.", ephemeral=True)

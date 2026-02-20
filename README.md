@@ -259,6 +259,7 @@ mismatch in `faster_whisper`).
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
 - `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
 - `/chronicle_status` - show current recorder status and reconnect/rotation counters.
+- `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
