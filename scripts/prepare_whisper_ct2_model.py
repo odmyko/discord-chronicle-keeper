@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Iterable
 
 
 def _safe_name(value: str) -> str:
@@ -29,6 +30,19 @@ def _set_env_value(lines: list[str], key: str, value: str) -> list[str]:
     if not updated:
         out.append(new_line)
     return out
+
+
+def _existing_copy_files(model_id: str, requested: Iterable[str]) -> list[str]:
+    try:
+        from huggingface_hub import list_repo_files
+    except Exception:
+        return list(requested)
+    try:
+        repo_files = set(list_repo_files(model_id))
+    except Exception:
+        # If listing fails, fallback to requested list.
+        return list(requested)
+    return [name for name in requested if name in repo_files]
 
 
 def update_env_file(env_path: Path, model_dir_name: str) -> None:
@@ -101,6 +115,13 @@ def main() -> int:
         shutil.rmtree(output_dir)
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
+    requested_copy_files = ["tokenizer.json", "preprocessor_config.json"]
+    copy_files = _existing_copy_files(args.model, requested_copy_files)
+    if copy_files:
+        print("Copying extra files:", ", ".join(copy_files))
+    else:
+        print("Warning: no optional copy files found in model repo.")
+
     cmd = [
         sys.executable,
         "-m",
@@ -111,10 +132,9 @@ def main() -> int:
         str(output_dir),
         "--quantization",
         args.quantization,
-        "--copy_files",
-        "tokenizer.json",
-        "preprocessor_config.json",
     ]
+    if copy_files:
+        cmd.extend(["--copy_files", *copy_files])
 
     print("Running:", " ".join(cmd))
     try:
@@ -126,11 +146,7 @@ def main() -> int:
         print(f"Error: model conversion failed with exit code {exc.returncode}.")
         return exc.returncode
 
-    required_files = [
-        output_dir / "model.bin",
-        output_dir / "tokenizer.json",
-        output_dir / "preprocessor_config.json",
-    ]
+    required_files = [output_dir / "model.bin"]
     missing_files = [str(p) for p in required_files if not p.exists()]
     if missing_files:
         print("Error: conversion finished but required files are missing:")
@@ -138,6 +154,12 @@ def main() -> int:
             print(f"  - {path}")
         print("Try running again with --force.")
         return 1
+
+    if not (output_dir / "preprocessor_config.json").exists():
+        print(
+            "Warning: preprocessor_config.json is missing. "
+            "Some models may fail at runtime with mel-shape mismatch (80 vs 128)."
+        )
 
     update_env_file(env_path, output_name)
     print(f"Model converted to: {output_dir}")

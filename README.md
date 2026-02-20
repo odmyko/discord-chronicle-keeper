@@ -245,6 +245,11 @@ If conversion previously succeeded but Whisper fails with mel-shape errors
 python scripts/prepare_whisper_ct2_model.py --model <model-id> --quantization float16 --force
 ```
 
+Note: some Hugging Face model repos do not include `tokenizer.json` or
+`preprocessor_config.json`. The helper script now auto-copies only existing files
+and warns if `preprocessor_config.json` is missing (this can cause runtime mel-shape
+mismatch in `faster_whisper`).
+
 ## Slash Commands
 
 - `/chronicle_setup` - set report text channel (dropdown channel picker).
