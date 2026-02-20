@@ -198,6 +198,12 @@ Notes:
 
 For custom local models with `faster_whisper`, convert and mount a CTranslate2 model:
 
+Install conversion dependencies in your active Python environment first:
+
+```bash
+python -m pip install ctranslate2 transformers torch
+```
+
 ```bash
 ct2-transformers-converter \
   --model anuragshas/whisper-large-v2-uk \
