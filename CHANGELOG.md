@@ -6,6 +6,21 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-20
+
+### Added
+- CI integration workflow with stub Whisper/LLM services (`tests/test_integration_pipeline.py`).
+- Pre-commit quality gates with Ruff and repository hygiene hook.
+- Mypy type-check stage in CI.
+- Repository hygiene guard script to block accidental commit of `.env`, `data/`, session artifacts, and oversized files.
+- Lightweight CLI to reprocess saved sessions from local audio artifacts:
+  - `python -m chronicle_keeper.reprocess --session-dir ...`
+
+### Changed
+- Replaced runtime `print` calls with structured `logging` and log levels.
+- Improved startup/retention/recovery observability with structured lifecycle logs and durations.
+- Expanded README testing/quality instructions for Linux and Windows PowerShell.
+
 ## [0.4.0] - 2026-02-19
 
 ### Added
