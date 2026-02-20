@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 import discord
 
-from .lmstudio_client import LMStudioClient
+from .llm_client import LLMClient
 from .whisper_client import WhisperClient
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class SessionProcessor:
         self,
         base_data_dir: Path,
         whisper: WhisperClient,
-        lmstudio: LMStudioClient,
+        llm: LLMClient,
         audio_normalize: bool = False,
         audio_target_sample_rate: int = 0,
         audio_target_channels: int = 0,
@@ -64,7 +64,7 @@ class SessionProcessor:
     ) -> None:
         self._base_data_dir = base_data_dir
         self._whisper = whisper
-        self._lmstudio = lmstudio
+        self._llm = llm
         self._audio_normalize = audio_normalize
         self._audio_target_sample_rate = max(0, audio_target_sample_rate)
         self._audio_target_channels = max(0, audio_target_channels)
@@ -199,7 +199,7 @@ class SessionProcessor:
         )
 
         if len(chunks) <= 1:
-            summary_markdown = await self._lmstudio.generate_summary(full_transcript, language=summary_language)
+            summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
         else:
             chunk_summaries: list[str] = []
             for idx, chunk in enumerate(chunks, start=1):
@@ -207,7 +207,7 @@ class SessionProcessor:
                 if chunk_summary_path.exists():
                     chunk_summary = chunk_summary_path.read_text(encoding="utf-8")
                 else:
-                    chunk_summary = await self._lmstudio.generate_chunk_summary(
+                    chunk_summary = await self._llm.generate_chunk_summary(
                         chunk,
                         chunk_index=idx,
                         total_chunks=len(chunks),
@@ -220,7 +220,7 @@ class SessionProcessor:
 
             combined = "\n\n".join(chunk_summaries)
             (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            summary_markdown = await self._lmstudio.combine_chunk_summaries(
+            summary_markdown = await self._llm.combine_chunk_summaries(
                 combined,
                 language=summary_language,
             )
@@ -313,12 +313,12 @@ class SessionProcessor:
 
         chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
         if len(chunks) <= 1:
-            summary_markdown = await self._lmstudio.generate_summary(full_transcript, language=summary_language)
+            summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
         else:
             chunk_summaries: list[str] = []
             for idx, chunk in enumerate(chunks, start=1):
                 chunk_summary_path = summary_chunks_dir / f"chunk_{idx:03d}.md"
-                chunk_summary = await self._lmstudio.generate_chunk_summary(
+                chunk_summary = await self._llm.generate_chunk_summary(
                     chunk,
                     chunk_index=idx,
                     total_chunks=len(chunks),
@@ -329,7 +329,7 @@ class SessionProcessor:
 
             combined = "\n\n".join(chunk_summaries)
             (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            summary_markdown = await self._lmstudio.combine_chunk_summaries(
+            summary_markdown = await self._llm.combine_chunk_summaries(
                 combined,
                 language=summary_language,
             )

@@ -15,10 +15,10 @@ class Settings:
     whisper_language: str
     whisper_task: str
     whisper_encode: bool
-    lmstudio_base_url: str
-    lmstudio_model: str
-    lmstudio_temperature: float
-    lmstudio_max_tokens: int
+    llm_base_url: str
+    llm_model: str
+    llm_temperature: float
+    llm_max_tokens: int
     processing_timeout_seconds: int
     summary_chunk_chars: int
     recording_rotation_seconds: int
@@ -49,13 +49,13 @@ def load_settings() -> Settings:
         raise RuntimeError("DISCORD_BOT_TOKEN is required in environment.")
 
     # Compose `models` can inject endpoint/model env vars.
-    # Prefer generic LLM_* names, then legacy aliases, then LM Studio vars.
+    # Prefer generic LLM_* names, then MODEL_RUNNER_* aliases.
     llm_base_url = os.getenv("LLM_BASE_URL", "").strip()
     llm_model = os.getenv("LLM_MODEL", "").strip()
     model_runner_base_url = os.getenv("MODEL_RUNNER_BASE_URL", "").strip()
     model_runner_name = os.getenv("MODEL_RUNNER_MODEL", "").strip()
-    lmstudio_base_url = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
-    lmstudio_model = os.getenv("LMSTUDIO_MODEL", "local-model").strip()
+    resolved_llm_base_url = (llm_base_url or model_runner_base_url or "http://127.0.0.1:1234/v1").strip()
+    resolved_llm_model = (llm_model or model_runner_name or "local-model").strip()
     audio_mp3_vbr_quality = int(os.getenv("AUDIO_MP3_VBR_QUALITY", "4"))
     if audio_mp3_vbr_quality < 0:
         audio_mp3_vbr_quality = 0
@@ -69,10 +69,10 @@ def load_settings() -> Settings:
         whisper_language=os.getenv("WHISPER_LANGUAGE", "ru"),
         whisper_task=os.getenv("WHISPER_TASK", "transcribe"),
         whisper_encode=_as_bool(os.getenv("WHISPER_ENCODE", "true"), default=True),
-        lmstudio_base_url=(llm_base_url or model_runner_base_url or lmstudio_base_url).rstrip("/"),
-        lmstudio_model=llm_model or model_runner_name or lmstudio_model,
-        lmstudio_temperature=float(os.getenv("LMSTUDIO_TEMPERATURE", "0.2")),
-        lmstudio_max_tokens=int(os.getenv("LMSTUDIO_MAX_TOKENS", "1400")),
+        llm_base_url=resolved_llm_base_url.rstrip("/"),
+        llm_model=resolved_llm_model,
+        llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
+        llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1400")),
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
         summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),

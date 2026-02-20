@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from .config import load_settings
-from .lmstudio_client import LMStudioClient
+from .llm_client import LLMClient
 from .processor import SessionProcessor
 from .whisper_client import WhisperClient
 
@@ -61,11 +61,11 @@ async def _run() -> int:
         raise RuntimeError(f"Session directory not found: {session_dir}")
 
     whisper = WhisperClient(settings)
-    lmstudio = LMStudioClient(settings)
+    llm = LLMClient(settings)
     processor = SessionProcessor(
         settings.data_dir,
         whisper,
-        lmstudio,
+        llm,
         audio_normalize=settings.audio_normalize,
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,

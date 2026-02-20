@@ -8,7 +8,7 @@ import wave
 
 from aiohttp import web
 
-from chronicle_keeper.lmstudio_client import LMStudioClient
+from chronicle_keeper.llm_client import LLMClient
 from chronicle_keeper.processor import SessionProcessor
 from chronicle_keeper.whisper_client import WhisperClient
 
@@ -77,14 +77,14 @@ async def _run_pipeline(tmp_path: Path) -> None:
         whisper_language="ru",
         whisper_task="transcribe",
         whisper_encode=True,
-        lmstudio_base_url=f"http://127.0.0.1:{port}/v1",
-        lmstudio_model="stub-model",
-        lmstudio_temperature=0.0,
-        lmstudio_max_tokens=256,
+        llm_base_url=f"http://127.0.0.1:{port}/v1",
+        llm_model="stub-model",
+        llm_temperature=0.0,
+        llm_max_tokens=256,
     )
 
     whisper = WhisperClient(settings)
-    llm = LMStudioClient(settings)
+    llm = LLMClient(settings)
     processor = SessionProcessor(tmp_path, whisper, llm)
 
     sink = _FakeSink({"123": _FakeAudioData(_build_wav_bytes())})

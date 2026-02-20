@@ -5,12 +5,12 @@ import aiohttp
 from .config import Settings
 
 
-class LMStudioClient:
+class LLMClient:
     def __init__(self, settings: Settings) -> None:
-        self._base_url = settings.lmstudio_base_url
-        self._model = settings.lmstudio_model
-        self._temperature = settings.lmstudio_temperature
-        self._max_tokens = settings.lmstudio_max_tokens
+        self._base_url = settings.llm_base_url
+        self._model = settings.llm_model
+        self._temperature = settings.llm_temperature
+        self._max_tokens = settings.llm_max_tokens
 
     async def _chat(self, system_prompt: str, user_prompt: str) -> str:
         endpoint = f"{self._base_url}/chat/completions"

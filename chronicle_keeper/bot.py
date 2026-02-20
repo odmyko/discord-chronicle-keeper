@@ -15,7 +15,7 @@ from discord.sinks.errors import RecordingException
 import discord.gateway as discord_gateway
 
 from .config import Settings, load_settings
-from .lmstudio_client import LMStudioClient
+from .llm_client import LLMClient
 from .processor import SessionProcessor
 from .storage import GuildSettingsStore
 from .whisper_client import WhisperClient
@@ -54,6 +54,13 @@ class GuildRecordingState:
     rotation_task: asyncio.Task | None = None
     finalizing: bool = False
     segment_sinks: list[discord.sinks.Sink] | None = None
+    started_at_utc: datetime | None = None
+    rotation_triggered: int = 0
+    rotation_resumed: int = 0
+    rotation_failed: int = 0
+    reconnect_attempts: int = 0
+    reconnect_successes: int = 0
+    reconnect_failures: int = 0
 
 
 def build_bot(settings: Settings) -> commands.Bot:
@@ -169,11 +176,11 @@ def build_bot(settings: Settings) -> commands.Bot:
     bot = commands.Bot(command_prefix="!", intents=intents)
     store = GuildSettingsStore(settings.data_dir / "guild_settings.json")
     whisper = WhisperClient(settings)
-    lmstudio = LMStudioClient(settings)
+    llm = LLMClient(settings)
     processor = SessionProcessor(
         settings.data_dir,
         whisper,
-        lmstudio,
+        llm,
         audio_normalize=settings.audio_normalize,
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
@@ -225,6 +232,106 @@ def build_bot(settings: Settings) -> commands.Bot:
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
         return sent
+
+    async def ffprobe_audio(path: str) -> tuple[float, int | None, int | None, int | None]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration,bit_rate",
+                "-show_entries",
+                "stream=sample_rate,channels",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+                path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return 0.0, None, None, None
+        out, _ = await proc.communicate()
+        if proc.returncode != 0 or not out:
+            return 0.0, None, None, None
+        lines = [line.strip() for line in out.decode("utf-8", errors="ignore").splitlines() if line.strip()]
+        # ffprobe default writer prints format entries first, then stream entries.
+        # Expected order for our query: duration, bit_rate, sample_rate, channels.
+        duration = 0.0
+        bit_rate: int | None = None
+        sample_rate: int | None = None
+        channels: int | None = None
+        if len(lines) > 0:
+            try:
+                duration = float(lines[0])
+            except ValueError:
+                duration = 0.0
+        if len(lines) > 1:
+            try:
+                bit_rate = int(float(lines[1]))
+            except ValueError:
+                bit_rate = None
+        if len(lines) > 2:
+            try:
+                sample_rate = int(lines[2])
+            except ValueError:
+                sample_rate = None
+        if len(lines) > 3:
+            try:
+                channels = int(lines[3])
+            except ValueError:
+                channels = None
+        return duration, bit_rate, sample_rate, channels
+
+    async def build_quality_report(
+        state: GuildRecordingState,
+        speaker_items: list,
+    ) -> str:
+        durations: list[float] = []
+        bitrates: list[int] = []
+        sample_rates: list[int] = []
+        channels_list: list[int] = []
+        for item in speaker_items:
+            duration, bit_rate, sample_rate, channels = await ffprobe_audio(str(item.audio_path))
+            if duration > 0:
+                durations.append(duration)
+            if bit_rate:
+                bitrates.append(bit_rate)
+            if sample_rate:
+                sample_rates.append(sample_rate)
+            if channels:
+                channels_list.append(channels)
+
+        total_duration = sum(durations)
+        avg_bitrate_kbps = (sum(bitrates) / len(bitrates) / 1000.0) if bitrates else None
+        dominant_sample_rate = max(sample_rates, key=sample_rates.count) if sample_rates else None
+        dominant_channels = max(channels_list, key=channels_list.count) if channels_list else None
+        elapsed_s = (
+            (datetime.now(UTC) - state.started_at_utc).total_seconds()
+            if state.started_at_utc is not None
+            else None
+        )
+
+        lines = ["## Recording Quality Report"]
+        lines.append(f"- Speaker tracks: `{len(speaker_items)}`")
+        lines.append(f"- Rotation events: `{state.rotation_triggered}` (resumed `{state.rotation_resumed}`, failed `{state.rotation_failed}`)")
+        lines.append(
+            f"- Reconnect attempts: `{state.reconnect_attempts}` (success `{state.reconnect_successes}`, failed `{state.reconnect_failures}`)"
+        )
+        if elapsed_s is not None:
+            lines.append(f"- Session wall time: `{elapsed_s:.1f}s`")
+        if total_duration > 0:
+            lines.append(f"- Sum of track durations: `{total_duration:.1f}s`")
+        if avg_bitrate_kbps is not None:
+            lines.append(f"- Average encoded bitrate: `{avg_bitrate_kbps:.1f} kbps`")
+        if dominant_sample_rate is not None:
+            lines.append(f"- Sample rate (dominant): `{dominant_sample_rate} Hz`")
+        if dominant_channels is not None:
+            lines.append(f"- Channels (dominant): `{dominant_channels}`")
+        lines.append(
+            "- Tip: if audio sounds choppy, try `RECORDING_ROTATION_SECONDS=0` and monitor reconnect counters."
+        )
+        return "\n".join(lines)
 
     def stop_background_tasks(state: GuildRecordingState) -> None:
         if state.health_task is not None:
@@ -918,6 +1025,45 @@ def build_bot(settings: Settings) -> commands.Bot:
         store.set_summary_language(ctx.guild.id, language)
         await ctx.respond(f"Summary language set to `{language}`.", ephemeral=True)
 
+    @bot.slash_command(name="chronicle_status", description="Show recorder status and health counters")
+    async def chronicle_status(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            return
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        configured_voice_id = store.get_voice_channel(ctx.guild.id)
+        configured_voice = ctx.guild.get_channel(configured_voice_id) if configured_voice_id else None
+        configured_text_id = store.get_chronicle_channel(ctx.guild.id)
+        configured_text = ctx.guild.get_channel(configured_text_id) if configured_text_id else None
+        voice_client = ctx.guild.voice_client
+        lines = ["## Chronicle Status"]
+        lines.append(f"- Recording active: `{state.sink is not None}`")
+        lines.append(f"- Processing active: `{state.processing}`")
+        lines.append(f"- Finalizing: `{state.finalizing}`")
+        lines.append(
+            f"- Configured voice channel: `{getattr(configured_voice, 'name', 'not set')}`"
+        )
+        lines.append(
+            f"- Configured chronicle channel: `{getattr(configured_text, 'name', 'not set')}`"
+        )
+        if voice_client is not None:
+            lines.append(
+                f"- Bot voice connection: `connected={voice_client.is_connected()} channel={getattr(voice_client.channel, 'name', 'none')}`"
+            )
+        else:
+            lines.append("- Bot voice connection: `none`")
+        if state.started_at_utc is not None:
+            elapsed_s = (datetime.now(UTC) - state.started_at_utc).total_seconds()
+            lines.append(f"- Session wall time: `{elapsed_s:.1f}s`")
+        lines.append(
+            f"- Rotation counters: `triggered={state.rotation_triggered}, resumed={state.rotation_resumed}, failed={state.rotation_failed}`"
+        )
+        lines.append(
+            f"- Reconnect counters: `attempts={state.reconnect_attempts}, success={state.reconnect_successes}, failed={state.reconnect_failures}`"
+        )
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
     @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
     async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
@@ -987,8 +1133,15 @@ def build_bot(settings: Settings) -> commands.Bot:
         if state.processing:
             await ctx.followup.send("Previous recording is still processing.", ephemeral=True)
             return
+        state.started_at_utc = datetime.now(UTC)
         state.finalizing = False
         state.segment_sinks = []
+        state.rotation_triggered = 0
+        state.rotation_resumed = 0
+        state.rotation_failed = 0
+        state.reconnect_attempts = 0
+        state.reconnect_successes = 0
+        state.reconnect_failures = 0
         stop_background_tasks(state)
         upsert_active_session(
             ctx.guild.id,
@@ -1031,6 +1184,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                     target_voice = guild.get_channel(state.voice_channel_id) if state.voice_channel_id else None
                     target_voice = _as_voice_like(target_voice)
                     if target_voice is None:
+                        state.rotation_failed += 1
                         await try_send(target_channel, "Rotation failed: voice channel is no longer available.")
                         return
                     recovered_client = await connect_voice_with_retry(guild, target_voice, attempts=3)
@@ -1053,8 +1207,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                         segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
                         finalizing=False,
                     )
+                    state.rotation_resumed += 1
                     await try_send(target_channel, "Recording segment rotated and resumed.")
                 except Exception as exc:
+                    state.rotation_failed += 1
                     await try_send(
                         target_channel,
                         f"Rotation restart failed: `{exc}`. Use `/chronicle_start` to continue.",
@@ -1144,6 +1300,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                 except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                     if target_channel is not fallback_channel:
                         await send_long(fallback_channel, artifacts.summary_markdown)
+                quality_report = await build_quality_report(state, artifacts.speaker_transcripts)
+                await try_send(target_channel, quality_report)
             except TimeoutError:
                 logger.warning(
                     "[session] processing_timeout guild_id=%s timeout_s=%s",
@@ -1162,6 +1320,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.processing = False
                 state.finalizing = False
                 state.voice_channel_id = None
+                state.started_at_utc = None
                 state.segment_sinks = []
                 stop_background_tasks(state)
                 clear_active_session(guild_id)
@@ -1210,8 +1369,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                     finalizing=False,
                 )
                 try:
+                    state.rotation_triggered += 1
                     guild.voice_client.stop_recording()
                 except Exception as exc:
+                    state.rotation_failed += 1
                     logger.exception("[rotation] stop_recording_failed guild_id=%s", guild_id)
                     await try_send(
                         fallback_channel,
@@ -1272,6 +1433,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                     "Voice connection looks unstable. Attempting automatic reconnect...",
                 )
                 try:
+                    state.reconnect_attempts += 1
                     recovered_client = await connect_voice_with_retry(
                         guild, target_voice_channel, attempts=3
                     )
@@ -1288,8 +1450,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                         fallback_channel,
                         "Voice connection recovered. Recording resumed.",
                     )
+                    state.reconnect_successes += 1
                     logger.info("[voice-health] recovered guild_id=%s", guild_id)
                 except Exception as exc:
+                    state.reconnect_failures += 1
                     logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
                     await try_send(
                         fallback_channel,
@@ -1329,6 +1493,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.sink = None
             state.voice_channel_id = None
             state.finalizing = False
+            state.started_at_utc = None
             stop_background_tasks(state)
             clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
@@ -1343,6 +1508,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.sink = None
             state.voice_channel_id = None
             state.finalizing = False
+            state.started_at_utc = None
             stop_background_tasks(state)
             clear_active_session(ctx.guild.id)
             snapshot = voice_state_snapshot(ctx.guild.voice_client)
@@ -1390,6 +1556,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.sink = None
         state.finalizing = False
         state.voice_channel_id = None
+        state.started_at_utc = None
         stop_background_tasks(state)
         clear_active_session(ctx.guild.id)
         await ctx.respond("Disconnected from voice channel.", ephemeral=True)

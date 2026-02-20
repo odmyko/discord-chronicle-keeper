@@ -25,7 +25,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
-2. Fill `.env` (`DISCORD_BOT_TOKEN`, `WHISPER_BASE_URL`, `LMSTUDIO_BASE_URL` or Compose model settings).
+2. Fill `.env` (`DISCORD_BOT_TOKEN`, `WHISPER_BASE_URL`, `LLM_BASE_URL` or Compose model settings).
 3. Start bot:
 ```bash
 python -m chronicle_keeper.bot
@@ -144,7 +144,7 @@ set these in `.env`:
 
 ```env
 WHISPER_BASE_URL=http://host.docker.internal:9000
-LMSTUDIO_BASE_URL=http://host.docker.internal:1234/v1
+LLM_BASE_URL=http://host.docker.internal:1234/v1
 ```
 
 ## Docker Compose (Bot + Whisper + LLM model)
@@ -191,7 +191,7 @@ Notes:
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
   - `LLM_MODEL` (selected model name)
-- The bot supports both generic `LLM_*` and `LMSTUDIO_*` env vars, so you can run LLM manually or through compose models.
+- The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 
 ### Local Whisper Model (CT2)
@@ -227,6 +227,7 @@ docker compose up -d --build
 - `/chronicle_setup_voice_here` - set your current voice channel as default recording channel.
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
 - `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
+- `/chronicle_status` - show current recorder status and reconnect/rotation counters.
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
 - `/chronicle_leave` - disconnect the bot from voice.
@@ -240,6 +241,7 @@ docker compose up -d --build
 - Large sessions are better posted in parts: the bot already chunks long messages to fit Discord limits.
 - Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
 - Discord file size limits can prevent uploading all `.mp3` artifacts in-channel; full files remain on disk.
+- Quality report is heuristic (duration/bitrate/reconnect/rotation counters) and not a full audio QA system.
 
 ## Versioning
 
