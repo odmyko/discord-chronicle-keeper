@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from pathlib import Path
 import re
 import shutil
@@ -78,6 +79,20 @@ def main() -> int:
     output_dir = Path("data") / "whisper-models" / output_name
     env_path = Path(args.env_file)
 
+    missing_modules = [
+        name
+        for name in ("ctranslate2", "transformers", "torch")
+        if importlib.util.find_spec(name) is None
+    ]
+    if missing_modules:
+        print(
+            "Error: missing Python dependencies in current interpreter "
+            f"({sys.executable}): {', '.join(missing_modules)}"
+        )
+        print("Install with:")
+        print(f'  "{sys.executable}" -m pip install ctranslate2 transformers torch')
+        return 1
+
     if output_dir.exists():
         if not args.force:
             print(f"Output already exists: {output_dir}")
@@ -87,7 +102,9 @@ def main() -> int:
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ct2-transformers-converter",
+        sys.executable,
+        "-m",
+        "ctranslate2.converters.transformers",
         "--model",
         args.model,
         "--output_dir",
@@ -100,8 +117,7 @@ def main() -> int:
     try:
         subprocess.run(cmd, check=True)
     except FileNotFoundError:
-        print("Error: ct2-transformers-converter not found in PATH.")
-        print("Install first, e.g. `pip install ctranslate2 transformers`.")
+        print("Error: Python executable not found.")
         return 1
     except subprocess.CalledProcessError as exc:
         print(f"Error: model conversion failed with exit code {exc.returncode}.")
