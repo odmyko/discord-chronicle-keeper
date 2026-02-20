@@ -21,6 +21,17 @@ class LLMClient:
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
 
+    @staticmethod
+    def _narrative_style_instruction(language_name: str) -> str:
+        return (
+            "Style requirements:\n"
+            f"- Write naturally and vividly in {language_name}.\n"
+            "- Keep facts grounded in transcript content; do not invent events.\n"
+            "- Prefer concise but atmospheric phrasing suitable for fantasy RPG sessions.\n"
+            "- In 'Player-Facing Chronicle Post', use an engaging narrative tone with 2-4 short paragraphs.\n"
+            "- You may add light dramatic phrasing, but preserve factual accuracy.\n"
+        )
+
     async def _chat(self, system_prompt: str, user_prompt: str) -> str:
         endpoint = f"{self._base_url}/chat/completions"
         payload = {
@@ -89,6 +100,7 @@ class LLMClient:
             lang = "ru"
 
         language_names = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
+        style_instruction = self._narrative_style_instruction(language_names[lang])
         system_prompt = (
             "You are an assistant for a tabletop RPG game master. "
             f"Write all output strictly in {language_names[lang]}."
@@ -101,6 +113,7 @@ class LLMClient:
             "# Open Threads\n"
             "# Player-Facing Chronicle Post\n\n"
             "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
+            f"{style_instruction}\n"
             f"Return all text in {language_names[lang]}.\n\n"
             "Transcript:\n"
             f"{transcript_text}"
@@ -140,6 +153,7 @@ class LLMClient:
         if lang not in {"en", "uk", "ru"}:
             lang = "ru"
         language_names = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
+        style_instruction = self._narrative_style_instruction(language_names[lang])
         system_prompt = (
             "You are an assistant for a tabletop RPG game master. "
             f"Write all output strictly in {language_names[lang]}."
@@ -152,6 +166,7 @@ class LLMClient:
             "# Open Threads\n"
             "# Player-Facing Chronicle Post\n\n"
             "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
+            f"{style_instruction}\n"
             f"Return all text in {language_names[lang]}.\n\n"
             "Chunk summaries:\n"
             f"{chunk_summaries_markdown}"
