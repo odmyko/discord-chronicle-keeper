@@ -9,7 +9,7 @@ services:
     env_file:
       - .env
     environment:
-      WHISPER_BASE_URL: http://whisper:9000
+      WHISPER_BASE_URL: ${BOT_WHISPER_BASE_URL:-http://whisper:9000}
       DATA_DIR: /app/data
     models:
       llm:
@@ -36,6 +36,25 @@ services:
       - "9000:9000"
     volumes:
       - ./data/whisper-models:/models/whisper
+
+  whisper_vllm:
+    profiles: ["vllm"]
+    build:
+      context: ./docker/vllm-whisper-audio
+      dockerfile: Dockerfile
+    image: discord-chronicle-vllm-whisper-audio:latest
+    container_name: vllm-whisper
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "8000:8000"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ./data/huggingface-cache:/root/.cache/huggingface
+    command:
+      - "--model"
+      - "${WHISPER_OPENAI_MODEL:-openai/whisper-large-v3-turbo}"
 
 models:
   llm:

@@ -11,14 +11,20 @@ from dotenv import load_dotenv
 class Settings:
     discord_bot_token: str
     whisper_base_url: str
+    whisper_api_style: str
     whisper_asr_path: str
+    whisper_openai_model: str
+    whisper_openai_temperature: float
+    whisper_openai_prompt: str
     whisper_language: str
     whisper_task: str
     whisper_encode: bool
+    whisper_warmup_on_start: bool
     llm_base_url: str
     llm_model: str
     llm_temperature: float
     llm_max_tokens: int
+    llm_warmup_on_start: bool
     processing_timeout_seconds: int
     summary_chunk_chars: int
     recording_rotation_seconds: int
@@ -68,14 +74,20 @@ def load_settings() -> Settings:
     return Settings(
         discord_bot_token=token,
         whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip("/"),
+        whisper_api_style=os.getenv("WHISPER_API_STYLE", "asr").strip().lower(),
         whisper_asr_path=os.getenv("WHISPER_ASR_PATH", "/asr"),
+        whisper_openai_model=os.getenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo").strip(),
+        whisper_openai_temperature=float(os.getenv("WHISPER_OPENAI_TEMPERATURE", "0.0")),
+        whisper_openai_prompt=os.getenv("WHISPER_OPENAI_PROMPT", "").strip(),
         whisper_language=os.getenv("WHISPER_LANGUAGE", "ru"),
         whisper_task=os.getenv("WHISPER_TASK", "transcribe"),
         whisper_encode=_as_bool(os.getenv("WHISPER_ENCODE", "true"), default=True),
+        whisper_warmup_on_start=_as_bool(os.getenv("WHISPER_WARMUP_ON_START", "false"), default=False),
         llm_base_url=resolved_llm_base_url.rstrip("/"),
         llm_model=resolved_llm_model,
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1400")),
+        llm_warmup_on_start=_as_bool(os.getenv("LLM_WARMUP_ON_START", "false"), default=False),
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
         summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),

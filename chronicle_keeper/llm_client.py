@@ -20,6 +20,7 @@ class LLMClient:
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
+        self._warmup_on_start = settings.llm_warmup_on_start
 
     @staticmethod
     def _narrative_style_instruction(language_name: str) -> str:
@@ -173,3 +174,15 @@ class LLMClient:
         )
         raw = await self._chat(system_prompt, user_prompt)
         return self._normalize_summary_markdown(raw, lang)
+
+    async def warmup(self) -> tuple[bool, str]:
+        if not self._warmup_on_start:
+            return False, "disabled"
+        try:
+            _ = await self._chat(
+                "You are a health-check assistant. Reply with exactly: OK",
+                "OK",
+            )
+            return True, "ok"
+        except Exception as exc:
+            return False, str(exc)

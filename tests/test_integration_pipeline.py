@@ -73,14 +73,20 @@ async def _run_pipeline(tmp_path: Path) -> None:
 
     settings = SimpleNamespace(
         whisper_base_url=f"http://127.0.0.1:{port}",
+        whisper_api_style="asr",
         whisper_asr_path="/asr",
+        whisper_openai_model="openai/whisper-large-v3-turbo",
+        whisper_openai_temperature=0.0,
+        whisper_openai_prompt="",
         whisper_language="ru",
         whisper_task="transcribe",
         whisper_encode=True,
+        whisper_warmup_on_start=False,
         llm_base_url=f"http://127.0.0.1:{port}/v1",
         llm_model="stub-model",
         llm_temperature=0.0,
         llm_max_tokens=256,
+        llm_warmup_on_start=False,
     )
 
     whisper = WhisperClient(settings)

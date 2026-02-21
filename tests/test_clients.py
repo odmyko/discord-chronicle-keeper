@@ -10,17 +10,23 @@ from chronicle_keeper.llm_client import LLMClient
 from chronicle_keeper.whisper_client import WhisperClient
 
 
-def _make_settings(port: int) -> SimpleNamespace:
+def _make_settings(port: int, api_style: str = "asr", asr_path: str = "/asr") -> SimpleNamespace:
     return SimpleNamespace(
         whisper_base_url=f"http://127.0.0.1:{port}",
-        whisper_asr_path="/asr",
+        whisper_api_style=api_style,
+        whisper_asr_path=asr_path,
+        whisper_openai_model="openai/whisper-large-v3-turbo",
+        whisper_openai_temperature=0.0,
+        whisper_openai_prompt="",
         whisper_language="ru",
         whisper_task="transcribe",
         whisper_encode=True,
+        whisper_warmup_on_start=False,
         llm_base_url=f"http://127.0.0.1:{port}/v1",
         llm_model="stub-model",
         llm_temperature=0.0,
         llm_max_tokens=256,
+        llm_warmup_on_start=False,
     )
 
 
@@ -74,6 +80,45 @@ def test_whisper_raises_on_http_error(tmp_path: Path) -> None:
                 assert False, "Expected RuntimeError for HTTP 500"
             except RuntimeError as exc:
                 assert "Whisper error 500" in str(exc)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(_run())
+
+
+def test_whisper_openai_transcriptions_mode(tmp_path: Path) -> None:
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3fake")
+
+    async def _run() -> None:
+        async def asr_handler(request: web.Request) -> web.Response:
+            data = await request.post()
+            assert "file" in data
+            assert data.get("model") == "openai/whisper-large-v3-turbo"
+            return web.json_response(
+                {
+                    "text": "hello world",
+                    "segments": [
+                        {"start": 0.0, "end": 0.5, "text": "hello"},
+                        {"start": 0.6, "end": 1.1, "text": "world"},
+                    ],
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/audio/transcriptions", asr_handler)
+        runner, port = await _run_server(app)
+        try:
+            client = WhisperClient(
+                _make_settings(
+                    port,
+                    api_style="openai",
+                    asr_path="/v1/audio/transcriptions",
+                )
+            )
+            detailed = await client.transcribe_file_detailed(audio)
+            assert detailed.text == "hello world"
+            assert len(detailed.segments) == 2
         finally:
             await runner.cleanup()
 
@@ -143,6 +188,29 @@ def test_llm_summary_normalizes_missing_sections() -> None:
                 "# Player-Facing Chronicle Post",
             ):
                 assert header in summary
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(_run())
+
+
+def test_llm_warmup_enabled() -> None:
+    async def _run() -> None:
+        async def llm_handler(request: web.Request) -> web.Response:
+            payload = await request.json()
+            assert payload.get("messages")
+            return web.json_response({"choices": [{"message": {"content": "OK"}}]})
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", llm_handler)
+        runner, port = await _run_server(app)
+        try:
+            settings = _make_settings(port)
+            settings.llm_warmup_on_start = True
+            client = LLMClient(settings)
+            ok, details = await client.warmup()
+            assert ok is True
+            assert details == "ok"
         finally:
             await runner.cleanup()
 

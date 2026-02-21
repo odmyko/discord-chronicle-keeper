@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import json
 from pathlib import Path
+import tempfile
+import wave
 
 import aiohttp
 
@@ -25,10 +28,16 @@ class TranscriptResult:
 class WhisperClient:
     def __init__(self, settings: Settings) -> None:
         self._base_url = settings.whisper_base_url
+        api_style = (settings.whisper_api_style or "asr").strip().lower()
+        self._api_style = api_style if api_style in {"asr", "openai"} else "asr"
         self._asr_path = settings.whisper_asr_path
+        self._openai_model = settings.whisper_openai_model
+        self._openai_temperature = settings.whisper_openai_temperature
+        self._openai_prompt = settings.whisper_openai_prompt
         self._language = settings.whisper_language
         self._task = settings.whisper_task
         self._encode = settings.whisper_encode
+        self._warmup_on_start = settings.whisper_warmup_on_start
 
     async def transcribe_file(self, audio_path: Path) -> str:
         result = await self.transcribe_file_detailed(audio_path)
@@ -48,30 +57,49 @@ class WhisperClient:
 
     async def _transcribe_once(self, audio_path: Path, language: str) -> TranscriptResult:
         endpoint = f"{self._base_url}{self._asr_path}"
-        params = {
-            "task": self._task,
-            "encode": str(self._encode).lower(),
-            "output": "json",
-        }
-        if language:
-            params["language"] = language
-
+        params: dict[str, str] = {}
         form = aiohttp.FormData()
-        with audio_path.open("rb") as fh:
-            form.add_field(
-                "audio_file",
-                fh,
-                filename=audio_path.name,
-                content_type="audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav",
-            )
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(endpoint, params=params, data=form, timeout=300) as resp:
-                        body = await resp.text()
-                        if resp.status >= 400:
-                            raise RuntimeError(f"Whisper error {resp.status}: {body[:400]}")
-                except TimeoutError:
-                    raise RuntimeError("Whisper request timed out (300s).")
+        content_type = "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+
+        if self._api_style == "openai":
+            with audio_path.open("rb") as fh:
+                form.add_field("file", fh, filename=audio_path.name, content_type=content_type)
+                form.add_field("model", self._openai_model)
+                form.add_field("response_format", "verbose_json")
+                form.add_field("timestamp_granularities[]", "segment")
+                form.add_field("temperature", str(self._openai_temperature))
+                if self._task:
+                    form.add_field("task", self._task)
+                if self._openai_prompt:
+                    form.add_field("prompt", self._openai_prompt)
+                if language:
+                    form.add_field("language", language)
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.post(endpoint, data=form, timeout=300) as resp:
+                            body = await resp.text()
+                            if resp.status >= 400:
+                                raise RuntimeError(f"Whisper error {resp.status}: {body[:400]}")
+                    except TimeoutError:
+                        raise RuntimeError("Whisper request timed out (300s).")
+        else:
+            params = {
+                "task": self._task,
+                "encode": str(self._encode).lower(),
+                "output": "json",
+            }
+            if language:
+                params["language"] = language
+            with audio_path.open("rb") as fh:
+                form.add_field("audio_file", fh, filename=audio_path.name, content_type=content_type)
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.post(endpoint, params=params, data=form, timeout=300) as resp:
+                            body = await resp.text()
+                            if resp.status >= 400:
+                                raise RuntimeError(f"Whisper error {resp.status}: {body[:400]}")
+                    except TimeoutError:
+                        raise RuntimeError("Whisper request timed out (300s).")
 
         try:
             payload = json.loads(body)
@@ -119,3 +147,26 @@ class WhisperClient:
         if isinstance(text, str):
             return TranscriptResult(text=text.strip(), segments=parsed_segments)
         return TranscriptResult(text=str(text).strip(), segments=parsed_segments)
+
+    async def warmup(self) -> tuple[bool, str]:
+        if not self._warmup_on_start:
+            return False, "disabled"
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            with wave.open(tmp_path, "wb") as wavf:
+                wavf.setnchannels(1)
+                wavf.setsampwidth(2)
+                wavf.setframerate(16000)
+                wavf.writeframes(b"\x00\x00" * 16000)
+            await self._transcribe_once(Path(tmp_path), language=self._language)
+            return True, "ok"
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass

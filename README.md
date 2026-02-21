@@ -106,6 +106,14 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `AUDIO_DUAL_PIPELINE_ENABLED=true`: dual pass:
   timeline timestamps from raw audio (no VAD), transcript text from processed audio.
   This improves chronology + ASR quality but increases processing time.
+- `WHISPER_API_STYLE=asr|openai`:
+  - `asr` uses `WHISPER_ASR_PATH=/asr` style API.
+  - `openai` uses `WHISPER_ASR_PATH=/v1/audio/transcriptions` and `WHISPER_OPENAI_MODEL`.
+- OpenAI-style ASR quality knobs:
+  - `WHISPER_OPENAI_TEMPERATURE=0.0` for stable/deterministic transcripts.
+  - `WHISPER_OPENAI_PROMPT=` to hint character names/lore vocabulary.
+- `WHISPER_WARMUP_ON_START=true` sends a tiny startup ASR request to reduce first real request latency.
+- `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
 - `AUDIO_VAD_ENABLED=false` (default): keep pauses/silence as-is.
@@ -159,6 +167,7 @@ LLM_BASE_URL=http://host.docker.internal:1234/v1
 This repo includes a full-stack compose setup:
 - `bot`: Discord Chronicle Keeper
 - `whisper`: `discord-chronicle-whisper5090:latest` (build recipe included)
+- `whisper_vllm` (optional profile): vLLM OpenAI-compatible transcription endpoint
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
 Start all services:
@@ -181,6 +190,13 @@ docker compose logs -f bot
 docker compose logs -f whisper
 ```
 
+Run optional vLLM Whisper endpoint (OpenAI transcription API):
+
+```bash
+docker compose --profile vllm up -d --build whisper_vllm
+docker compose logs -f whisper_vllm
+```
+
 Stop:
 
 ```bash
@@ -189,8 +205,17 @@ docker compose down
 
 Notes:
 - Whisper Dockerfile is at `docker/whisper5090/Dockerfile` and reproduces the CUDA 12.8 torch patch for RTX 5090.
+- Optional vLLM audio Dockerfile is at `docker/vllm-whisper-audio/Dockerfile` (installs `vllm[audio]`).
 - Compose overrides Whisper URL to internal service name:
-  - `WHISPER_BASE_URL=http://whisper:9000`
+  - bot default: `WHISPER_BASE_URL=http://whisper:9000`
+  - override via `.env`: `BOT_WHISPER_BASE_URL=http://whisper_vllm:8000`
+- For vLLM OpenAI transcription API set in `.env`:
+  - `WHISPER_API_STYLE=openai`
+  - `WHISPER_ASR_PATH=/v1/audio/transcriptions`
+  - `WHISPER_OPENAI_MODEL=openai/whisper-large-v3-turbo`
+  - `WHISPER_OPENAI_TEMPERATURE=0.0`
+  - `WHISPER_OPENAI_PROMPT=Names: <your party names and world terms>`
+  - `WHISPER_WARMUP_ON_START=true`
 - Whisper model/engine are configurable via `.env`:
   - `WHISPER_ASR_ENGINE` (`openai_whisper` or `faster_whisper`)
   - `WHISPER_ASR_MODEL` (for example `large-v3-turbo`, `large-v3`, `distil-large-v3`)
@@ -264,6 +289,17 @@ Use this helper to benchmark your Whisper endpoint on latest recorded `.mp3`
 
 ```bash
 python scripts/benchmark_whisper.py --whisper-url http://127.0.0.1:9000 --runs 3
+```
+
+For OpenAI-compatible transcription endpoints (vLLM, etc.):
+
+```bash
+python scripts/benchmark_whisper.py \
+  --api-style openai \
+  --asr-path /v1/audio/transcriptions \
+  --model openai/whisper-large-v3-turbo \
+  --whisper-url http://127.0.0.1:8000 \
+  --runs 3
 ```
 
 Or target a specific file:

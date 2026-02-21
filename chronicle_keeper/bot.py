@@ -881,6 +881,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             logger.info("[runtime] detected %s active session entries from previous run", active_count)
         await run_startup_cleanup()
         await recover_unfinished_sessions()
+        ok, details = await whisper.warmup()
+        logger.info("[whisper] warmup status=%s details=%s", ok, details)
+        ok, details = await llm.warmup()
+        logger.info("[llm] warmup status=%s details=%s", ok, details)
 
     async def resolve_invoking_member(ctx: discord.ApplicationContext) -> discord.Member | None:
         if ctx.guild is None or ctx.user is None:
