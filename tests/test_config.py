@@ -37,6 +37,9 @@ def test_load_settings_defaults(monkeypatch):
     monkeypatch.setenv("AUDIO_DUAL_PIPELINE_ENABLED", "false")
     monkeypatch.setenv("AUDIO_VAD_ENABLED", "false")
     monkeypatch.setenv("PUBLISH_PER_SPEAKER_AUDIO", "false")
+    monkeypatch.setenv("VOICE_DECODE_BURST_WINDOW_SECONDS", "15")
+    monkeypatch.setenv("VOICE_DECODE_BURST_THRESHOLD", "8")
+    monkeypatch.setenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60")
     # Keep this test deterministic even when local .env exists.
     monkeypatch.setenv("SUMMARY_CHUNK_CHARS", "14000")
     monkeypatch.setenv("RECORDING_ROTATION_SECONDS", "1800")
@@ -57,6 +60,9 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.audio_dual_pipeline_enabled is False
     assert settings.audio_vad_enabled is False
     assert settings.publish_per_speaker_audio is False
+    assert settings.voice_decode_burst_window_seconds == 15
+    assert settings.voice_decode_burst_threshold == 8
+    assert settings.voice_decode_burst_cooldown_seconds == 60
     assert settings.whisper_api_style == "asr"
     assert settings.whisper_openai_model == "openai/whisper-large-v3-turbo"
     assert settings.whisper_fallback_enabled is False

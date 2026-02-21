@@ -49,6 +49,9 @@ class Settings:
     audio_target_channels: int
     audio_mp3_vbr_quality: int
     publish_per_speaker_audio: bool
+    voice_decode_burst_window_seconds: int
+    voice_decode_burst_threshold: int
+    voice_decode_burst_cooldown_seconds: int
     data_dir: Path
 
 
@@ -158,6 +161,9 @@ def load_settings() -> Settings:
         audio_target_channels=int(os.getenv("AUDIO_TARGET_CHANNELS", "0")),
         audio_mp3_vbr_quality=audio_mp3_vbr_quality,
         publish_per_speaker_audio=_as_bool(os.getenv("PUBLISH_PER_SPEAKER_AUDIO", "false"), default=False),
+        voice_decode_burst_window_seconds=max(5, int(os.getenv("VOICE_DECODE_BURST_WINDOW_SECONDS", "15"))),
+        voice_decode_burst_threshold=max(1, int(os.getenv("VOICE_DECODE_BURST_THRESHOLD", "8"))),
+        voice_decode_burst_cooldown_seconds=max(5, int(os.getenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60"))),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
 

@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 import json
@@ -63,6 +64,10 @@ class GuildRecordingState:
     reconnect_attempts: int = 0
     reconnect_successes: int = 0
     reconnect_failures: int = 0
+    decode_burst_triggers: int = 0
+    decode_burst_skipped_cooldown: int = 0
+    last_decode_burst_at_utc: str | None = None
+    decode_recovery_cooldown_until: float = 0.0
     done_callback: DoneCallback | None = None
     fallback_channel: discord.abc.Messageable | None = None
 
@@ -194,6 +199,24 @@ def build_bot(settings: Settings) -> commands.Bot:
         summary_chunk_chars=settings.summary_chunk_chars,
     )
     guild_state: dict[int, GuildRecordingState] = {}
+    decode_error_events: deque[float] = deque()
+
+    class OpusDecodeErrorHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            message = record.getMessage().lower()
+            # py-cord usually logs two lines per decode issue; count one signal marker.
+            if "opus_decode" not in message:
+                return
+            now = time.monotonic()
+            decode_error_events.append(now)
+            window = max(1, settings.voice_decode_burst_window_seconds)
+            while decode_error_events and (now - decode_error_events[0]) > window:
+                decode_error_events.popleft()
+
+    opus_logger = logging.getLogger("discord.opus")
+    if not getattr(opus_logger, "_chronicle_decode_handler", False):
+        opus_logger.addHandler(OpusDecodeErrorHandler())
+        opus_logger._chronicle_decode_handler = True
 
     async def send_long(channel: discord.abc.Messageable, text: str) -> None:
         for chunk in chunk_text(text):
@@ -691,6 +714,13 @@ def build_bot(settings: Settings) -> commands.Bot:
             raise last_error
         raise RuntimeError("Failed to start recording for unknown reason.")
 
+    def recent_decode_error_count() -> int:
+        now = time.monotonic()
+        window = max(1, settings.voice_decode_burst_window_seconds)
+        while decode_error_events and (now - decode_error_events[0]) > window:
+            decode_error_events.popleft()
+        return len(decode_error_events)
+
     async def rotation_loop(
         guild_id: int,
         fallback_channel: discord.abc.Messageable,
@@ -781,6 +811,54 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             if healthy:
                 missed_checks = 0
+                decode_count = recent_decode_error_count()
+                now_mono = time.monotonic()
+                if decode_count >= settings.voice_decode_burst_threshold:
+                    if now_mono < state.decode_recovery_cooldown_until:
+                        state.decode_burst_skipped_cooldown += 1
+                        logger.warning(
+                            "[voice-health] decode_burst_ignored_cooldown guild_id=%s decode_count=%s cooldown_remaining_s=%.1f",
+                            guild_id,
+                            decode_count,
+                            state.decode_recovery_cooldown_until - now_mono,
+                        )
+                        continue
+                    logger.warning(
+                        "[voice-health] decode_burst_detected guild_id=%s decode_count=%s window_s=%s",
+                        guild_id,
+                        decode_count,
+                        settings.voice_decode_burst_window_seconds,
+                    )
+                    state.decode_burst_triggers += 1
+                    state.last_decode_burst_at_utc = datetime.now(UTC).isoformat()
+                    state.decode_recovery_cooldown_until = (
+                        now_mono + max(1, settings.voice_decode_burst_cooldown_seconds)
+                    )
+                    await try_send(
+                        fallback_channel,
+                        (
+                            "Detected voice decode error burst. "
+                            "Forcing segment rollover and reconnect..."
+                        ),
+                    )
+                    upsert_active_session(
+                        guild_id,
+                        status="rotating",
+                        voice_channel_id=state.voice_channel_id,
+                        chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                        segment_count=len(state.segment_sinks or []),
+                        finalizing=False,
+                    )
+                    try:
+                        state.rotation_triggered += 1
+                        voice_client.stop_recording()
+                    except Exception as exc:
+                        state.rotation_failed += 1
+                        logger.exception("[voice-health] decode_burst_rollover_failed guild_id=%s", guild_id)
+                        await try_send(
+                            fallback_channel,
+                            f"Decode burst recovery failed: `{exc}`",
+                        )
                 continue
 
             missed_checks += 1
@@ -1262,6 +1340,23 @@ def build_bot(settings: Settings) -> commands.Bot:
         lines.append(
             f"- Reconnect counters: `attempts={state.reconnect_attempts}, success={state.reconnect_successes}, failed={state.reconnect_failures}`"
         )
+        lines.append(
+            (
+                "- Decode burst counters: "
+                f"`triggers={state.decode_burst_triggers}, cooldown_skips={state.decode_burst_skipped_cooldown}, "
+                f"recent_errors={recent_decode_error_count()}`"
+            )
+        )
+        lines.append(
+            (
+                "- Decode burst config: "
+                f"`window={settings.voice_decode_burst_window_seconds}s, "
+                f"threshold={settings.voice_decode_burst_threshold}, "
+                f"cooldown={settings.voice_decode_burst_cooldown_seconds}s`"
+            )
+        )
+        if state.last_decode_burst_at_utc:
+            lines.append(f"- Last decode burst: `{state.last_decode_burst_at_utc}`")
         await ctx.respond("\n".join(lines), ephemeral=True)
 
     @bot.slash_command(
@@ -1531,6 +1626,11 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.reconnect_attempts = 0
         state.reconnect_successes = 0
         state.reconnect_failures = 0
+        state.decode_burst_triggers = 0
+        state.decode_burst_skipped_cooldown = 0
+        state.last_decode_burst_at_utc = None
+        state.decode_recovery_cooldown_until = 0.0
+        decode_error_events.clear()
         stop_background_tasks(state)
         upsert_active_session(
             ctx.guild.id,
@@ -1724,6 +1824,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.voice_channel_id = None
                 state.started_at_utc = None
                 state.segment_sinks = []
+                state.decode_recovery_cooldown_until = 0.0
                 stop_background_tasks(state)
                 clear_active_session(guild_id)
                 guild = bot.get_guild(guild_id)

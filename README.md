@@ -141,6 +141,11 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
 - Extra compact preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=6`.
+- Voice decode burst guard (auto recovery for repeated decode failures):
+  - `VOICE_DECODE_BURST_WINDOW_SECONDS=15`
+  - `VOICE_DECODE_BURST_THRESHOLD=8`
+  - `VOICE_DECODE_BURST_COOLDOWN_SECONDS=60`
+  - when threshold is hit, bot forces segment rollover and reconnect; counters are visible in `/chronicle_status`.
 
 Long session processing options:
 - `PROCESSING_TIMEOUT_SECONDS=7200` sets max end-of-session processing time.
@@ -357,7 +362,7 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_setup_voice_here` - set your current voice channel as default recording channel.
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
 - `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
-- `/chronicle_status` - show current recorder status and reconnect/rotation counters.
+- `/chronicle_status` - show current recorder status and reconnect/rotation/decode-burst counters.
 - `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
