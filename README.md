@@ -35,6 +35,15 @@ python -m chronicle_keeper.bot
 - `/chronicle_start`
 - `/chronicle_stop`
 
+## Docs
+
+Additional practical documentation:
+- `docs/architecture.md` - system architecture and data flow.
+- `docs/config-reference.md` - environment variable reference and backend presets.
+- `docs/operations.md` - day-to-day runbook (start/stop/switch/reprocess/recovery).
+- `docs/troubleshooting.md` - common errors and fixes.
+- `docs/performance-tuning.md` - quality/speed tuning guidelines.
+
 ## Architecture
 
 ```mermaid

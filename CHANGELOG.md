@@ -6,6 +6,19 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-02-21
+
+### Added
+- Practical project documentation set under `docs/`:
+  - `docs/architecture.md`
+  - `docs/config-reference.md`
+  - `docs/operations.md`
+  - `docs/troubleshooting.md`
+  - `docs/performance-tuning.md`
+
+### Changed
+- README now includes a dedicated `Docs` section linking to the new documentation pages.
+
 ## [0.8.0] - 2026-02-21
 
 ### Added
