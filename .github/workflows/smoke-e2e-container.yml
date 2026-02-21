@@ -1,0 +1,63 @@
+name: Smoke E2E (Container, Optional)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-e2e-container:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build bot image
+        run: docker build -t discord-chronicle-keeper:ci .
+
+      - name: Build mock API image
+        run: docker build -t chronicle-mock-api:ci docker/mock-api
+
+      - name: Generate tiny smoke audio fixture
+        run: |
+          python - <<'PY'
+          import math, wave, struct, pathlib
+          path = pathlib.Path("tests/fixtures/smoke_ci.wav")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          rate = 16000
+          seconds = 1.0
+          freq = 440.0
+          amp = 0.2
+          frames = int(rate * seconds)
+          with wave.open(str(path), "wb") as wavf:
+              wavf.setnchannels(1)
+              wavf.setsampwidth(2)
+              wavf.setframerate(rate)
+              for i in range(frames):
+                  sample = int(32767.0 * amp * math.sin(2.0 * math.pi * freq * (i / rate)))
+                  wavf.writeframes(struct.pack("<h", sample))
+          print(path)
+          PY
+
+      - name: Run containerized smoke e2e
+        run: |
+          docker network create smoke-net
+          docker run -d --rm --name mock-api --network smoke-net chronicle-mock-api:ci
+          docker run --rm \
+            --network smoke-net \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e DISCORD_BOT_TOKEN=smoke-token \
+            -e DATA_DIR=/workspace/data \
+            -e WHISPER_BASE_URL=http://mock-api:18080 \
+            -e WHISPER_API_STYLE=asr \
+            -e WHISPER_ASR_PATH=/asr \
+            -e LLM_BASE_URL=http://mock-api:18080 \
+            -e LLM_MODEL=smoke-model \
+            discord-chronicle-keeper:ci \
+            python scripts/smoke_e2e.py --audio tests/fixtures/smoke_ci.wav
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f mock-api || true
+          docker network rm smoke-net || true
+

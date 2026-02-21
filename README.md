@@ -362,7 +362,7 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_setup_voice_here` - set your current voice channel as default recording channel.
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
 - `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
-- `/chronicle_status` - show current recorder status and reconnect/rotation/decode-burst counters.
+- `/chronicle_status` - show current recorder status and reconnect/rotation/decode-burst counters, plus runtime metrics (calls/errors/latency by stage).
 - `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
@@ -500,6 +500,9 @@ python -m compileall chronicle_keeper
 python -m mypy
 python -m pytest -q
 ```
+
+Optional GitHub Actions workflow:
+- `Smoke E2E (Container, Optional)` (`workflow_dispatch`) builds bot + mock API containers and runs `scripts/smoke_e2e.py` inside containerized environment.
 
 ## Security
 

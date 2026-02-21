@@ -9,11 +9,13 @@ import logging
 from pathlib import Path
 import re
 from collections import OrderedDict
+import time
 from typing import NamedTuple
 
 import discord
 
 from .llm_client import LLMClient
+from .metrics import RuntimeMetrics
 from .whisper_client import WhisperClient, TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ class SessionProcessor:
         audio_target_channels: int = 0,
         audio_mp3_vbr_quality: int = 4,
         summary_chunk_chars: int = 14000,
+        metrics: RuntimeMetrics | None = None,
     ) -> None:
         self._base_data_dir = base_data_dir
         self._whisper = whisper
@@ -85,6 +88,12 @@ class SessionProcessor:
         self._audio_target_channels = max(0, audio_target_channels)
         self._audio_mp3_vbr_quality = min(9, max(0, audio_mp3_vbr_quality))
         self._summary_chunk_chars = max(4000, summary_chunk_chars)
+        self._metrics = metrics
+
+    def _observe_metric(self, stage: str, started: float, ok: bool) -> None:
+        if self._metrics is None:
+            return
+        self._metrics.observe(stage, time.perf_counter() - started, ok)
 
     async def process_sink(
         self,
@@ -100,8 +109,10 @@ class SessionProcessor:
         sinks: list[discord.sinks.Sink],
         summary_language: str = "ru",
     ) -> SessionArtifacts:
+        process_started = time.perf_counter()
         valid_sinks = [s for s in sinks if getattr(s, "audio_data", None)]
         if not valid_sinks:
+            self._observe_metric("session_process", process_started, False)
             raise RuntimeError("No audio data captured in any recording segment.")
 
         logger.info(
@@ -167,14 +178,32 @@ class SessionProcessor:
                         speaker_name,
                         wav_path.name,
                     )
-                    timeline_result = await self._whisper.transcribe_file_detailed(wav_path)
-                compressed_path = await self._compress_audio(wav_path)
+                    asr_started = time.perf_counter()
+                    try:
+                        timeline_result = await self._whisper.transcribe_file_detailed(wav_path)
+                    except Exception:
+                        self._observe_metric("asr_transcribe", asr_started, False)
+                        raise
+                    self._observe_metric("asr_transcribe", asr_started, True)
+                compress_started = time.perf_counter()
+                try:
+                    compressed_path = await self._compress_audio(wav_path)
+                except Exception:
+                    self._observe_metric("audio_compress", compress_started, False)
+                    raise
+                self._observe_metric("audio_compress", compress_started, True)
                 logger.debug(
                     "[processor] transcribe content(clean) start speaker=%s file=%s",
                     speaker_name,
                     compressed_path.name,
                 )
-                content_result = await self._whisper.transcribe_file_detailed(compressed_path)
+                asr_started = time.perf_counter()
+                try:
+                    content_result = await self._whisper.transcribe_file_detailed(compressed_path)
+                except Exception:
+                    self._observe_metric("asr_transcribe", asr_started, False)
+                    raise
+                self._observe_metric("asr_transcribe", asr_started, True)
                 transcript = content_result.text
                 if not transcript and timeline_result is not None:
                     transcript = timeline_result.text
@@ -242,7 +271,14 @@ class SessionProcessor:
         )
 
         if len(chunks) <= 1:
-            summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+            llm_started = time.perf_counter()
+            try:
+                summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+            except Exception:
+                self._observe_metric("llm_summarize", llm_started, False)
+                self._observe_metric("session_process", process_started, False)
+                raise
+            self._observe_metric("llm_summarize", llm_started, True)
         else:
             chunk_summaries: list[str] = []
             for idx, chunk in enumerate(chunks, start=1):
@@ -250,12 +286,19 @@ class SessionProcessor:
                 if chunk_summary_path.exists():
                     chunk_summary = chunk_summary_path.read_text(encoding="utf-8")
                 else:
-                    chunk_summary = await self._llm.generate_chunk_summary(
-                        chunk,
-                        chunk_index=idx,
-                        total_chunks=len(chunks),
-                        language=summary_language,
-                    )
+                    llm_started = time.perf_counter()
+                    try:
+                        chunk_summary = await self._llm.generate_chunk_summary(
+                            chunk,
+                            chunk_index=idx,
+                            total_chunks=len(chunks),
+                            language=summary_language,
+                        )
+                    except Exception:
+                        self._observe_metric("llm_summarize", llm_started, False)
+                        self._observe_metric("session_process", process_started, False)
+                        raise
+                    self._observe_metric("llm_summarize", llm_started, True)
                     chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
                 chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
                 checkpoint["summary_chunks_done"] = idx
@@ -263,18 +306,33 @@ class SessionProcessor:
 
             combined = "\n\n".join(chunk_summaries)
             (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            summary_markdown = await self._llm.combine_chunk_summaries(
-                combined,
-                language=summary_language,
-            )
+            llm_started = time.perf_counter()
+            try:
+                summary_markdown = await self._llm.combine_chunk_summaries(
+                    combined,
+                    language=summary_language,
+                )
+            except Exception:
+                self._observe_metric("llm_summarize", llm_started, False)
+                self._observe_metric("session_process", process_started, False)
+                raise
+            self._observe_metric("llm_summarize", llm_started, True)
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
-        mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+        mix_started = time.perf_counter()
+        try:
+            mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+        except Exception:
+            self._observe_metric("audio_mix", mix_started, False)
+            self._observe_metric("session_process", process_started, False)
+            raise
+        self._observe_metric("audio_mix", mix_started, True)
         checkpoint["final_summary_done"] = True
         checkpoint["status"] = "done"
         self._write_checkpoint(checkpoint_path, checkpoint)
         logger.info("[processor] done session_dir=%s", session_dir)
+        self._observe_metric("session_process", process_started, True)
 
         return SessionArtifacts(
             session_dir=session_dir,
@@ -291,10 +349,12 @@ class SessionProcessor:
         session_dir: Path,
         summary_language: str = "ru",
     ) -> SessionArtifacts:
+        reprocess_started = time.perf_counter()
         audio_dir = session_dir / "audio"
         transcript_dir = session_dir / "transcripts"
         summary_chunks_dir = session_dir / "summary_chunks"
         if not audio_dir.exists() or not audio_dir.is_dir():
+            self._observe_metric("session_reprocess", reprocess_started, False)
             raise RuntimeError(f"Session audio directory not found: {audio_dir}")
 
         transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -302,6 +362,7 @@ class SessionProcessor:
 
         entries = self._collect_saved_audio_entries(audio_dir)
         if not entries:
+            self._observe_metric("session_reprocess", reprocess_started, False)
             raise RuntimeError(f"No supported audio files found in {audio_dir}")
 
         logger.info(
@@ -321,7 +382,14 @@ class SessionProcessor:
                 entry.user_id,
                 entry.path.name,
             )
-            transcript_result = await self._whisper.transcribe_file_detailed(entry.path)
+            asr_started = time.perf_counter()
+            try:
+                transcript_result = await self._whisper.transcribe_file_detailed(entry.path)
+            except Exception:
+                self._observe_metric("asr_transcribe", asr_started, False)
+                self._observe_metric("session_reprocess", reprocess_started, False)
+                raise
+            self._observe_metric("asr_transcribe", asr_started, True)
             transcript = transcript_result.text
             logger.debug(
                 "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
@@ -373,35 +441,64 @@ class SessionProcessor:
 
         chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
         if len(chunks) <= 1:
-            summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+            llm_started = time.perf_counter()
+            try:
+                summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+            except Exception:
+                self._observe_metric("llm_summarize", llm_started, False)
+                self._observe_metric("session_reprocess", reprocess_started, False)
+                raise
+            self._observe_metric("llm_summarize", llm_started, True)
         else:
             chunk_summaries: list[str] = []
             for idx, chunk in enumerate(chunks, start=1):
                 chunk_summary_path = summary_chunks_dir / f"chunk_{idx:03d}.md"
-                chunk_summary = await self._llm.generate_chunk_summary(
-                    chunk,
-                    chunk_index=idx,
-                    total_chunks=len(chunks),
-                    language=summary_language,
-                )
+                llm_started = time.perf_counter()
+                try:
+                    chunk_summary = await self._llm.generate_chunk_summary(
+                        chunk,
+                        chunk_index=idx,
+                        total_chunks=len(chunks),
+                        language=summary_language,
+                    )
+                except Exception:
+                    self._observe_metric("llm_summarize", llm_started, False)
+                    self._observe_metric("session_reprocess", reprocess_started, False)
+                    raise
+                self._observe_metric("llm_summarize", llm_started, True)
                 chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
                 chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
 
             combined = "\n\n".join(chunk_summaries)
             (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            summary_markdown = await self._llm.combine_chunk_summaries(
-                combined,
-                language=summary_language,
-            )
+            llm_started = time.perf_counter()
+            try:
+                summary_markdown = await self._llm.combine_chunk_summaries(
+                    combined,
+                    language=summary_language,
+                )
+            except Exception:
+                self._observe_metric("llm_summarize", llm_started, False)
+                self._observe_metric("session_reprocess", reprocess_started, False)
+                raise
+            self._observe_metric("llm_summarize", llm_started, True)
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
-        mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+        mix_started = time.perf_counter()
+        try:
+            mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+        except Exception:
+            self._observe_metric("audio_mix", mix_started, False)
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise
+        self._observe_metric("audio_mix", mix_started, True)
         logger.info(
             "[reprocess] done session_dir=%s transcript_file=%s",
             session_dir,
             full_transcript_txt_path.name,
         )
+        self._observe_metric("session_reprocess", reprocess_started, True)
         return SessionArtifacts(
             session_dir=session_dir,
             full_transcript=full_transcript,

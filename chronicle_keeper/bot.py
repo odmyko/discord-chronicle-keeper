@@ -18,6 +18,7 @@ import discord.gateway as discord_gateway
 
 from .config import Settings, config_doctor_issues, load_settings
 from .llm_client import LLMClient
+from .metrics import RuntimeMetrics
 from .processor import SessionProcessor
 from .storage import GuildSettingsStore
 from .whisper_client import WhisperClient
@@ -186,6 +187,7 @@ def build_bot(settings: Settings) -> commands.Bot:
     store = GuildSettingsStore(settings.data_dir / "guild_settings.json")
     whisper = WhisperClient(settings)
     llm = LLMClient(settings)
+    metrics = RuntimeMetrics()
     processor = SessionProcessor(
         settings.data_dir,
         whisper,
@@ -197,6 +199,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
         summary_chunk_chars=settings.summary_chunk_chars,
+        metrics=metrics,
     )
     guild_state: dict[int, GuildRecordingState] = {}
     decode_error_events: deque[float] = deque()
@@ -223,12 +226,16 @@ def build_bot(settings: Settings) -> commands.Bot:
             await channel.send(chunk)
 
     async def try_send(channel: discord.abc.Messageable | None, text: str) -> bool:
+        started = time.perf_counter()
         if channel is None:
+            metrics.observe("discord_publish", time.perf_counter() - started, False)
             return False
         try:
             await channel.send(text)
+            metrics.observe("discord_publish", time.perf_counter() - started, True)
             return True
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            metrics.observe("discord_publish", time.perf_counter() - started, False)
             return False
 
     async def try_send_file(
@@ -236,12 +243,16 @@ def build_bot(settings: Settings) -> commands.Bot:
         path: str,
         content: str | None = None,
     ) -> bool:
+        started = time.perf_counter()
         if channel is None:
+            metrics.observe("discord_publish", time.perf_counter() - started, False)
             return False
         try:
             await channel.send(content=content, file=discord.File(path))
+            metrics.observe("discord_publish", time.perf_counter() - started, True)
             return True
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            metrics.observe("discord_publish", time.perf_counter() - started, False)
             return False
 
     async def try_send_files(
@@ -250,7 +261,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         content: str | None = None,
         batch_size: int = 5,
     ) -> int:
+        started = time.perf_counter()
         if channel is None or not paths:
+            metrics.observe("discord_publish", time.perf_counter() - started, False)
             return 0
         sent = 0
         for i in range(0, len(paths), batch_size):
@@ -258,8 +271,11 @@ def build_bot(settings: Settings) -> commands.Bot:
             try:
                 await channel.send(content=content if i == 0 else None, files=files)
                 sent += len(files)
+                metrics.observe("discord_publish", 0.0, True)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                metrics.observe("discord_publish", 0.0, False)
                 continue
+        metrics.observe("discord_publish", time.perf_counter() - started, sent > 0)
         return sent
 
     async def ffprobe_audio(path: str) -> tuple[float, int | None, int | None, int | None]:
@@ -1357,6 +1373,29 @@ def build_bot(settings: Settings) -> commands.Bot:
         )
         if state.last_decode_burst_at_utc:
             lines.append(f"- Last decode burst: `{state.last_decode_burst_at_utc}`")
+        metrics_snapshot = metrics.snapshot()
+        interesting_stages = (
+            "session_process",
+            "session_reprocess",
+            "asr_transcribe",
+            "llm_summarize",
+            "audio_compress",
+            "audio_mix",
+            "discord_publish",
+        )
+        for stage in interesting_stages:
+            stage_metrics = metrics_snapshot.get(stage)
+            if not stage_metrics:
+                continue
+            lines.append(
+                (
+                    f"- Metrics `{stage}`: "
+                    f"`calls={stage_metrics['calls']}, "
+                    f"errors={stage_metrics['errors']}, "
+                    f"avg={stage_metrics['avg_latency_s']:.2f}s, "
+                    f"max={stage_metrics['max_latency_s']:.2f}s`"
+                )
+            )
         await ctx.respond("\n".join(lines), ephemeral=True)
 
     @bot.slash_command(
