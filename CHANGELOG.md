@@ -6,6 +6,22 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-02-21
+
+### Added
+- Voice receive hardening for decode error bursts:
+  - sliding-window detection of repeated Opus decode errors
+  - forced segment rollover + reconnect recovery path
+  - cooldown guard to avoid recovery flapping
+- New runtime settings:
+  - `VOICE_DECODE_BURST_WINDOW_SECONDS`
+  - `VOICE_DECODE_BURST_THRESHOLD`
+  - `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
+
+### Changed
+- `/chronicle_status` now includes decode-burst counters and decode-burst config values.
+- README updated with decode-burst guard runtime knobs.
+
 ## [0.9.0] - 2026-02-21
 
 ### Added

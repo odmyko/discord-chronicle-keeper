@@ -27,6 +27,12 @@ Fix:
 - occasional packets can be noisy; frequent errors indicate unstable voice path
 - check reconnect counters via `/chronicle_status`
 - test with `RECORDING_ROTATION_SECONDS=0`
+- tune decode-burst guard (auto rollover + reconnect):
+  - `VOICE_DECODE_BURST_WINDOW_SECONDS`
+  - `VOICE_DECODE_BURST_THRESHOLD`
+  - `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
+- if recovery triggers too often, increase threshold and/or cooldown
+- if decode errors persist for long, check host network stability and Discord region path
 
 ## No speech detected
 
@@ -51,4 +57,3 @@ Fix:
 
 - ensure bot has access to target text channel
 - verify channel binding with `/chronicle_setup_channels`
-
