@@ -18,4 +18,3 @@ COPY chronicle_keeper ./chronicle_keeper
 COPY README.md ./
 
 CMD ["python", "-m", "chronicle_keeper.bot"]
-

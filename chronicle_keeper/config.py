@@ -87,7 +87,9 @@ def load_settings() -> Settings:
     llm_model = os.getenv("LLM_MODEL", "").strip()
     model_runner_base_url = os.getenv("MODEL_RUNNER_BASE_URL", "").strip()
     model_runner_name = os.getenv("MODEL_RUNNER_MODEL", "").strip()
-    resolved_llm_base_url = (llm_base_url or model_runner_base_url or "http://127.0.0.1:1234/v1").strip()
+    resolved_llm_base_url = (
+        llm_base_url or model_runner_base_url or "http://127.0.0.1:1234/v1"
+    ).strip()
     resolved_llm_model = (llm_model or model_runner_name or "local-model").strip()
     audio_mp3_vbr_quality = int(os.getenv("AUDIO_MP3_VBR_QUALITY", "4"))
     if audio_mp3_vbr_quality < 0:
@@ -98,18 +100,32 @@ def load_settings() -> Settings:
     whisper_api_style = os.getenv("WHISPER_API_STYLE", "asr").strip().lower()
     if whisper_api_style not in {"asr", "openai"}:
         whisper_api_style = "asr"
-    whisper_fallback_api_style = os.getenv("WHISPER_FALLBACK_API_STYLE", "").strip().lower()
-    if whisper_fallback_api_style and whisper_fallback_api_style not in {"asr", "openai"}:
+    whisper_fallback_api_style = (
+        os.getenv("WHISPER_FALLBACK_API_STYLE", "").strip().lower()
+    )
+    if whisper_fallback_api_style and whisper_fallback_api_style not in {
+        "asr",
+        "openai",
+    }:
         whisper_fallback_api_style = ""
 
-    whisper_asr_path = _normalize_whisper_path(whisper_api_style, os.getenv("WHISPER_ASR_PATH", ""))
+    whisper_asr_path = _normalize_whisper_path(
+        whisper_api_style, os.getenv("WHISPER_ASR_PATH", "")
+    )
     fallback_style_resolved = whisper_fallback_api_style or whisper_api_style
     fallback_path_default = os.getenv("WHISPER_FALLBACK_ASR_PATH", "")
-    whisper_fallback_asr_path = _normalize_whisper_path(fallback_style_resolved, fallback_path_default)
-    whisper_fallback_base_url = os.getenv("WHISPER_FALLBACK_BASE_URL", "").strip().rstrip("/")
+    whisper_fallback_asr_path = _normalize_whisper_path(
+        fallback_style_resolved, fallback_path_default
+    )
+    whisper_fallback_base_url = (
+        os.getenv("WHISPER_FALLBACK_BASE_URL", "").strip().rstrip("/")
+    )
     whisper_fallback_enabled_default = bool(whisper_fallback_base_url)
     whisper_fallback_enabled = _as_bool(
-        os.getenv("WHISPER_FALLBACK_ENABLED", "true" if whisper_fallback_enabled_default else "false"),
+        os.getenv(
+            "WHISPER_FALLBACK_ENABLED",
+            "true" if whisper_fallback_enabled_default else "false",
+        ),
         default=whisper_fallback_enabled_default,
     )
     whisper_fallback_on_low_quality = _as_bool(
@@ -119,51 +135,87 @@ def load_settings() -> Settings:
 
     return Settings(
         discord_bot_token=token,
-        whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip("/"),
+        whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip(
+            "/"
+        ),
         whisper_api_style=whisper_api_style,
         whisper_asr_path=whisper_asr_path,
-        whisper_openai_model=os.getenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo").strip(),
-        whisper_openai_temperature=float(os.getenv("WHISPER_OPENAI_TEMPERATURE", "0.0")),
+        whisper_openai_model=os.getenv(
+            "WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo"
+        ).strip(),
+        whisper_openai_temperature=float(
+            os.getenv("WHISPER_OPENAI_TEMPERATURE", "0.0")
+        ),
         whisper_openai_prompt=os.getenv("WHISPER_OPENAI_PROMPT", "").strip(),
         whisper_language=os.getenv("WHISPER_LANGUAGE", "ru"),
         whisper_task=os.getenv("WHISPER_TASK", "transcribe"),
         whisper_encode=_as_bool(os.getenv("WHISPER_ENCODE", "true"), default=True),
-        whisper_warmup_on_start=_as_bool(os.getenv("WHISPER_WARMUP_ON_START", "false"), default=False),
+        whisper_warmup_on_start=_as_bool(
+            os.getenv("WHISPER_WARMUP_ON_START", "false"), default=False
+        ),
         whisper_fallback_enabled=whisper_fallback_enabled,
         whisper_fallback_base_url=whisper_fallback_base_url,
         whisper_fallback_api_style=fallback_style_resolved,
         whisper_fallback_asr_path=whisper_fallback_asr_path,
         whisper_fallback_openai_model=(
             os.getenv("WHISPER_FALLBACK_OPENAI_MODEL", "").strip()
-            or os.getenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo").strip()
+            or os.getenv(
+                "WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo"
+            ).strip()
         ),
         whisper_fallback_on_low_quality=whisper_fallback_on_low_quality,
-        whisper_low_quality_min_chars=max(0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_CHARS", "40"))),
-        whisper_low_quality_min_segments=max(0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "1"))),
+        whisper_low_quality_min_chars=max(
+            0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_CHARS", "40"))
+        ),
+        whisper_low_quality_min_segments=max(
+            0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "1"))
+        ),
         llm_base_url=resolved_llm_base_url.rstrip("/"),
         llm_model=resolved_llm_model,
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1400")),
-        llm_warmup_on_start=_as_bool(os.getenv("LLM_WARMUP_ON_START", "false"), default=False),
+        llm_warmup_on_start=_as_bool(
+            os.getenv("LLM_WARMUP_ON_START", "false"), default=False
+        ),
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
         summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
-        recovery_auto_post_partial=_as_bool(os.getenv("RECOVERY_AUTO_POST_PARTIAL", "true"), default=True),
+        recovery_auto_post_partial=_as_bool(
+            os.getenv("RECOVERY_AUTO_POST_PARTIAL", "true"), default=True
+        ),
         recovery_max_sessions=int(os.getenv("RECOVERY_MAX_SESSIONS", "20")),
-        auto_cleanup_enabled=_as_bool(os.getenv("AUTO_CLEANUP_ENABLED", "false"), default=False),
-        auto_cleanup_on_start=_as_bool(os.getenv("AUTO_CLEANUP_ON_START", "false"), default=False),
+        auto_cleanup_enabled=_as_bool(
+            os.getenv("AUTO_CLEANUP_ENABLED", "false"), default=False
+        ),
+        auto_cleanup_on_start=_as_bool(
+            os.getenv("AUTO_CLEANUP_ON_START", "false"), default=False
+        ),
         retention_days=int(os.getenv("RETENTION_DAYS", "30")),
-        allow_purge_commands=_as_bool(os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False),
-        audio_dual_pipeline_enabled=_as_bool(os.getenv("AUDIO_DUAL_PIPELINE_ENABLED", "false"), default=False),
+        allow_purge_commands=_as_bool(
+            os.getenv("ALLOW_PURGE_COMMANDS", "false"), default=False
+        ),
+        audio_dual_pipeline_enabled=_as_bool(
+            os.getenv("AUDIO_DUAL_PIPELINE_ENABLED", "false"), default=False
+        ),
         audio_normalize=_as_bool(os.getenv("AUDIO_NORMALIZE", "false"), default=False),
-        audio_vad_enabled=_as_bool(os.getenv("AUDIO_VAD_ENABLED", "false"), default=False),
+        audio_vad_enabled=_as_bool(
+            os.getenv("AUDIO_VAD_ENABLED", "false"), default=False
+        ),
         audio_target_sample_rate=int(os.getenv("AUDIO_TARGET_SAMPLE_RATE", "0")),
         audio_target_channels=int(os.getenv("AUDIO_TARGET_CHANNELS", "0")),
         audio_mp3_vbr_quality=audio_mp3_vbr_quality,
-        publish_per_speaker_audio=_as_bool(os.getenv("PUBLISH_PER_SPEAKER_AUDIO", "false"), default=False),
-        voice_decode_burst_window_seconds=max(5, int(os.getenv("VOICE_DECODE_BURST_WINDOW_SECONDS", "15"))),
-        voice_decode_burst_threshold=max(1, int(os.getenv("VOICE_DECODE_BURST_THRESHOLD", "8"))),
-        voice_decode_burst_cooldown_seconds=max(5, int(os.getenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60"))),
+        publish_per_speaker_audio=_as_bool(
+            os.getenv("PUBLISH_PER_SPEAKER_AUDIO", "false"), default=False
+        ),
+        voice_decode_burst_window_seconds=max(
+            5, int(os.getenv("VOICE_DECODE_BURST_WINDOW_SECONDS", "15"))
+        ),
+        voice_decode_burst_threshold=max(
+            1, int(os.getenv("VOICE_DECODE_BURST_THRESHOLD", "8"))
+        ),
+        voice_decode_burst_cooldown_seconds=max(
+            5, int(os.getenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60"))
+        ),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
 
@@ -174,20 +226,33 @@ def config_doctor_issues(settings: Settings) -> list[str]:
         issues.append(
             f"WHISPER_API_STYLE=asr but WHISPER_ASR_PATH={settings.whisper_asr_path}. Expected /asr."
         )
-    if settings.whisper_api_style == "openai" and settings.whisper_asr_path != "/v1/audio/transcriptions":
+    if (
+        settings.whisper_api_style == "openai"
+        and settings.whisper_asr_path != "/v1/audio/transcriptions"
+    ):
         issues.append(
             "WHISPER_API_STYLE=openai but WHISPER_ASR_PATH is not /v1/audio/transcriptions."
         )
     if settings.whisper_fallback_enabled and not settings.whisper_fallback_base_url:
-        issues.append("WHISPER_FALLBACK_ENABLED=true but WHISPER_FALLBACK_BASE_URL is empty.")
-    if settings.whisper_fallback_on_low_quality and not settings.whisper_fallback_enabled:
-        issues.append("WHISPER_FALLBACK_ON_LOW_QUALITY=true but WHISPER_FALLBACK_ENABLED=false.")
+        issues.append(
+            "WHISPER_FALLBACK_ENABLED=true but WHISPER_FALLBACK_BASE_URL is empty."
+        )
+    if (
+        settings.whisper_fallback_on_low_quality
+        and not settings.whisper_fallback_enabled
+    ):
+        issues.append(
+            "WHISPER_FALLBACK_ON_LOW_QUALITY=true but WHISPER_FALLBACK_ENABLED=false."
+        )
     if settings.whisper_fallback_enabled:
         same_target = (
-            settings.whisper_base_url.rstrip("/") == settings.whisper_fallback_base_url.rstrip("/")
+            settings.whisper_base_url.rstrip("/")
+            == settings.whisper_fallback_base_url.rstrip("/")
             and settings.whisper_api_style == settings.whisper_fallback_api_style
             and settings.whisper_asr_path == settings.whisper_fallback_asr_path
         )
         if same_target:
-            issues.append("Whisper fallback target matches primary target; fallback has no effect.")
+            issues.append(
+                "Whisper fallback target matches primary target; fallback has no effect."
+            )
     return issues

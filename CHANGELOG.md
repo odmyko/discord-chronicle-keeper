@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-02-21
+
 ### Added
 - Optional containerized smoke workflow for CI (`.github/workflows/smoke-e2e-container.yml`, manual dispatch).
 - Lightweight runtime metrics module (`chronicle_keeper/metrics.py`) with stage call/error/latency counters.

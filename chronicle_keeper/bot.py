@@ -26,7 +26,9 @@ from .whisper_client import WhisperClient
 
 DISCORD_SAFE_LIMIT = 1900
 VoiceLikeChannel = discord.VoiceChannel
-DoneCallback = Callable[[discord.sinks.Sink, discord.abc.Messageable, int], Awaitable[None]]
+DoneCallback = Callable[
+    [discord.sinks.Sink, discord.abc.Messageable, int], Awaitable[None]
+]
 logger = logging.getLogger(__name__)
 
 
@@ -87,7 +89,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         "xsalsa20_poly1305_lite",
     )
     try:
-        supported_modes = list(getattr(discord.VoiceClient, "supported_modes", ()) or ())
+        supported_modes = list(
+            getattr(discord.VoiceClient, "supported_modes", ()) or ()
+        )
         for mode in extra_voice_modes:
             if mode not in supported_modes:
                 supported_modes.append(mode)
@@ -98,7 +102,10 @@ def build_bot(settings: Settings) -> commands.Bot:
     # Prefer xchacha mode when available. Some py-cord builds can connect with AES mode
     # but produce decode errors on receive in certain environments.
     try:
-        if not getattr(discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False):
+        if not getattr(
+            discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False
+        ):
+
             async def _patched_initial_connection(self, data):
                 state = self._connection
                 state.ssrc = data["ssrc"]
@@ -117,7 +124,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.ip = recv[ip_start:ip_end].decode("ascii")
                 state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
 
-                modes = [mode for mode in data["modes"] if mode in self._connection.supported_modes]
+                modes = [
+                    mode
+                    for mode in data["modes"]
+                    if mode in self._connection.supported_modes
+                ]
                 preferred_order = (
                     "aead_xchacha20_poly1305_rtpsize",
                     "aead_aes256_gcm_rtpsize",
@@ -134,9 +145,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                     mode = modes[0]
 
                 await self.select_protocol(state.ip, state.port, mode)
-                discord_gateway._log.info("selected the voice protocol for use (%s)", mode)
+                discord_gateway._log.info(
+                    "selected the voice protocol for use (%s)", mode
+                )
 
-            discord_gateway.DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
+            discord_gateway.DiscordVoiceWebSocket.initial_connection = (
+                _patched_initial_connection
+            )
             discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
     except Exception:
         pass
@@ -146,6 +161,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         import nacl.bindings
 
         if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
+
             def _encrypt_aead_aes256_gcm_rtpsize(self, header: bytes, data) -> bytes:
                 nonce = bytearray(12)
                 nonce[:4] = struct.pack(">I", self._lite_nonce)
@@ -158,9 +174,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 return header + ciphertext + nonce[:4]
 
-            setattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize", _encrypt_aead_aes256_gcm_rtpsize)
+            setattr(
+                discord.VoiceClient,
+                "_encrypt_aead_aes256_gcm_rtpsize",
+                _encrypt_aead_aes256_gcm_rtpsize,
+            )
 
         if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
+
             def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
                 nonce = bytearray(12)
                 nonce[:4] = data[-4:]
@@ -174,7 +195,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 # Discord prepends 8 bytes before opus payload for *_rtpsize modes.
                 return decrypted[8:]
 
-            setattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize", _decrypt_aead_aes256_gcm_rtpsize)
+            setattr(
+                discord.VoiceClient,
+                "_decrypt_aead_aes256_gcm_rtpsize",
+                _decrypt_aead_aes256_gcm_rtpsize,
+            )
     except Exception:
         pass
 
@@ -278,7 +303,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         metrics.observe("discord_publish", time.perf_counter() - started, sent > 0)
         return sent
 
-    async def ffprobe_audio(path: str) -> tuple[float, int | None, int | None, int | None]:
+    async def ffprobe_audio(
+        path: str,
+    ) -> tuple[float, int | None, int | None, int | None]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffprobe",
@@ -299,7 +326,11 @@ def build_bot(settings: Settings) -> commands.Bot:
         out, _ = await proc.communicate()
         if proc.returncode != 0 or not out:
             return 0.0, None, None, None
-        lines = [line.strip() for line in out.decode("utf-8", errors="ignore").splitlines() if line.strip()]
+        lines = [
+            line.strip()
+            for line in out.decode("utf-8", errors="ignore").splitlines()
+            if line.strip()
+        ]
         # ffprobe default writer prints format entries first, then stream entries.
         # Expected order for our query: duration, bit_rate, sample_rate, channels.
         duration = 0.0
@@ -337,7 +368,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         sample_rates: list[int] = []
         channels_list: list[int] = []
         for item in speaker_items:
-            duration, bit_rate, sample_rate, channels = await ffprobe_audio(str(item.audio_path))
+            duration, bit_rate, sample_rate, channels = await ffprobe_audio(
+                str(item.audio_path)
+            )
             if duration > 0:
                 durations.append(duration)
             if bit_rate:
@@ -348,9 +381,15 @@ def build_bot(settings: Settings) -> commands.Bot:
                 channels_list.append(channels)
 
         total_duration = sum(durations)
-        avg_bitrate_kbps = (sum(bitrates) / len(bitrates) / 1000.0) if bitrates else None
-        dominant_sample_rate = max(sample_rates, key=sample_rates.count) if sample_rates else None
-        dominant_channels = max(channels_list, key=channels_list.count) if channels_list else None
+        avg_bitrate_kbps = (
+            (sum(bitrates) / len(bitrates) / 1000.0) if bitrates else None
+        )
+        dominant_sample_rate = (
+            max(sample_rates, key=sample_rates.count) if sample_rates else None
+        )
+        dominant_channels = (
+            max(channels_list, key=channels_list.count) if channels_list else None
+        )
         elapsed_s = (
             (datetime.now(UTC) - state.started_at_utc).total_seconds()
             if state.started_at_utc is not None
@@ -359,7 +398,9 @@ def build_bot(settings: Settings) -> commands.Bot:
 
         lines = ["## Recording Quality Report"]
         lines.append(f"- Speaker tracks: `{len(speaker_items)}`")
-        lines.append(f"- Rotation events: `{state.rotation_triggered}` (resumed `{state.rotation_resumed}`, failed `{state.rotation_failed}`)")
+        lines.append(
+            f"- Rotation events: `{state.rotation_triggered}` (resumed `{state.rotation_resumed}`, failed `{state.rotation_failed}`)"
+        )
         lines.append(
             f"- Reconnect attempts: `{state.reconnect_attempts}` (success `{state.reconnect_successes}`, failed `{state.reconnect_failures}`)"
         )
@@ -421,7 +462,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         payload = load_json_file(runtime_state_path())
         if not isinstance(payload, dict):
             return {"active_sessions": {}}
-        if "active_sessions" not in payload or not isinstance(payload.get("active_sessions"), dict):
+        if "active_sessions" not in payload or not isinstance(
+            payload.get("active_sessions"), dict
+        ):
             payload["active_sessions"] = {}
         return payload
 
@@ -444,12 +487,20 @@ def build_bot(settings: Settings) -> commands.Bot:
         entry = {
             "guild_id": guild_id,
             "status": status,
-            "voice_channel_id": voice_channel_id if voice_channel_id is not None else current.get("voice_channel_id"),
+            "voice_channel_id": voice_channel_id
+            if voice_channel_id is not None
+            else current.get("voice_channel_id"),
             "chronicle_channel_id": (
-                chronicle_channel_id if chronicle_channel_id is not None else current.get("chronicle_channel_id")
+                chronicle_channel_id
+                if chronicle_channel_id is not None
+                else current.get("chronicle_channel_id")
             ),
-            "segment_count": segment_count if segment_count is not None else current.get("segment_count", 0),
-            "finalizing": finalizing if finalizing is not None else current.get("finalizing", False),
+            "segment_count": segment_count
+            if segment_count is not None
+            else current.get("segment_count", 0),
+            "finalizing": finalizing
+            if finalizing is not None
+            else current.get("finalizing", False),
             "rotation_seconds": settings.recording_rotation_seconds,
             "started_at_utc": current.get("started_at_utc", now),
             "updated_at_utc": now,
@@ -473,7 +524,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         if not guild_sessions_dir.exists() or not guild_sessions_dir.is_dir():
             return None
         candidates = [
-            p for p in guild_sessions_dir.iterdir() if p.is_dir() and session_timestamp_utc(p.name) is not None
+            p
+            for p in guild_sessions_dir.iterdir()
+            if p.is_dir() and session_timestamp_utc(p.name) is not None
         ]
         if not candidates:
             return None
@@ -544,12 +597,17 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     async def recover_unfinished_sessions() -> None:
         if not settings.recovery_auto_post_partial:
-            logger.info("[recovery] startup_skip recovery_auto_post_partial=%s", settings.recovery_auto_post_partial)
+            logger.info(
+                "[recovery] startup_skip recovery_auto_post_partial=%s",
+                settings.recovery_auto_post_partial,
+            )
             return
 
         sessions_root = settings.data_dir / "sessions"
         if not sessions_root.exists():
-            logger.info("[recovery] startup_skip reason=no_sessions_root path=%s", sessions_root)
+            logger.info(
+                "[recovery] startup_skip reason=no_sessions_root path=%s", sessions_root
+            )
             return
 
         started = time.perf_counter()
@@ -682,7 +740,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             duration_s,
         )
 
-    async def wait_voice_ready(voice_client: discord.VoiceClient, timeout_s: float = 20.0) -> bool:
+    async def wait_voice_ready(
+        voice_client: discord.VoiceClient, timeout_s: float = 20.0
+    ) -> bool:
         checks = max(1, int(timeout_s * 10))
         for _ in range(checks):
             if voice_client.is_connected() and voice_client.channel is not None:
@@ -764,7 +824,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 return
             guild = bot.get_guild(guild_id)
             if guild is None or guild.voice_client is None:
-                logger.warning("[rotation] skip guild_id=%s reason=voice_client_missing", guild_id)
+                logger.warning(
+                    "[rotation] skip guild_id=%s reason=voice_client_missing", guild_id
+                )
                 continue
             await try_send(
                 fallback_channel,
@@ -783,7 +845,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 guild.voice_client.stop_recording()
             except Exception as exc:
                 state.rotation_failed += 1
-                logger.exception("[rotation] stop_recording_failed guild_id=%s", guild_id)
+                logger.exception(
+                    "[rotation] stop_recording_failed guild_id=%s", guild_id
+                )
                 await try_send(
                     fallback_channel,
                     f"Rotation trigger failed: `{exc}`",
@@ -815,7 +879,10 @@ def build_bot(settings: Settings) -> commands.Bot:
 
             guild = bot.get_guild(guild_id)
             if guild is None:
-                logger.warning("[voice-health] monitor_stopped guild_id=%s reason=guild_missing", guild_id)
+                logger.warning(
+                    "[voice-health] monitor_stopped guild_id=%s reason=guild_missing",
+                    guild_id,
+                )
                 return
 
             voice_client = guild.voice_client
@@ -847,8 +914,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                     )
                     state.decode_burst_triggers += 1
                     state.last_decode_burst_at_utc = datetime.now(UTC).isoformat()
-                    state.decode_recovery_cooldown_until = (
-                        now_mono + max(1, settings.voice_decode_burst_cooldown_seconds)
+                    state.decode_recovery_cooldown_until = now_mono + max(
+                        1, settings.voice_decode_burst_cooldown_seconds
                     )
                     await try_send(
                         fallback_channel,
@@ -870,7 +937,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                         voice_client.stop_recording()
                     except Exception as exc:
                         state.rotation_failed += 1
-                        logger.exception("[voice-health] decode_burst_rollover_failed guild_id=%s", guild_id)
+                        logger.exception(
+                            "[voice-health] decode_burst_rollover_failed guild_id=%s",
+                            guild_id,
+                        )
                         await try_send(
                             fallback_channel,
                             f"Decode burst recovery failed: `{exc}`",
@@ -916,7 +986,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     status="recording",
                     voice_channel_id=target_voice_channel.id,
                     chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                    segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                    segment_count=(len(state.segment_sinks) + 1)
+                    if state.segment_sinks
+                    else 1,
                     finalizing=False,
                 )
                 await try_send(
@@ -935,7 +1007,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
             except Exception as exc:
                 state.reconnect_failures += 1
-                logger.exception("[voice-health] reconnect_failed guild_id=%s", guild_id)
+                logger.exception(
+                    "[voice-health] reconnect_failed guild_id=%s", guild_id
+                )
                 await try_send(
                     fallback_channel,
                     f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
@@ -952,7 +1026,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 current = guild.voice_client
                 if current is not None:
                     # Recreate stale/disconnected clients instead of reusing them.
-                    if (not current.is_connected()) or current.channel is None or current.channel.id != voice_channel.id:
+                    if (
+                        (not current.is_connected())
+                        or current.channel is None
+                        or current.channel.id != voice_channel.id
+                    ):
                         await current.disconnect(force=True)
                         await asyncio.sleep(0.5)
                         current = None
@@ -971,7 +1049,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         logger.info("Logged in as %s (id=%s)", bot.user, bot.user.id)
         issues = config_doctor_issues(settings)
         if issues:
-            logger.warning("[config-doctor] detected %s potential issue(s):", len(issues))
+            logger.warning(
+                "[config-doctor] detected %s potential issue(s):", len(issues)
+            )
             for issue in issues:
                 logger.warning("[config-doctor] %s", issue)
         else:
@@ -979,7 +1059,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         runtime_state = load_runtime_state()
         active_count = len(runtime_state.get("active_sessions", {}))
         if active_count > 0:
-            logger.info("[runtime] detected %s active session entries from previous run", active_count)
+            logger.info(
+                "[runtime] detected %s active session entries from previous run",
+                active_count,
+            )
         await run_startup_cleanup()
         await recover_unfinished_sessions()
         ok, details = await whisper.warmup()
@@ -987,7 +1070,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         ok, details = await llm.warmup()
         logger.info("[llm] warmup status=%s details=%s", ok, details)
 
-    async def resolve_invoking_member(ctx: discord.ApplicationContext) -> discord.Member | None:
+    async def resolve_invoking_member(
+        ctx: discord.ApplicationContext,
+    ) -> discord.Member | None:
         if ctx.guild is None or ctx.user is None:
             return None
         if isinstance(ctx.author, discord.Member):
@@ -1008,7 +1093,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             return channel
         return None
 
-    async def resolve_invoking_voice_channel(ctx: discord.ApplicationContext) -> VoiceLikeChannel | None:
+    async def resolve_invoking_voice_channel(
+        ctx: discord.ApplicationContext,
+    ) -> VoiceLikeChannel | None:
         member = await resolve_invoking_member(ctx)
         if member and member.voice:
             voice_like = _as_voice_like(member.voice.channel)
@@ -1041,7 +1128,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 return channel
         return None
 
-    def resolve_text_channel(ctx: discord.ApplicationContext, raw_channel: object | None) -> discord.TextChannel | None:
+    def resolve_text_channel(
+        ctx: discord.ApplicationContext, raw_channel: object | None
+    ) -> discord.TextChannel | None:
         if ctx.guild is None:
             return None
 
@@ -1061,7 +1150,9 @@ def build_bot(settings: Settings) -> commands.Bot:
 
             if channel_value:
                 exact_matches = [
-                    ch for ch in ctx.guild.text_channels if ch.name.casefold() == channel_value.casefold()
+                    ch
+                    for ch in ctx.guild.text_channels
+                    if ch.name.casefold() == channel_value.casefold()
                 ]
                 if len(exact_matches) == 1:
                     resolved_channel = exact_matches[0]
@@ -1078,7 +1169,9 @@ def build_bot(settings: Settings) -> commands.Bot:
 
         return resolved_channel
 
-    def resolve_voice_channel(ctx: discord.ApplicationContext, raw_channel: object | None) -> VoiceLikeChannel | None:
+    def resolve_voice_channel(
+        ctx: discord.ApplicationContext, raw_channel: object | None
+    ) -> VoiceLikeChannel | None:
         if ctx.guild is None:
             return None
 
@@ -1115,21 +1208,30 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     async def require_manage_guild(ctx: discord.ApplicationContext) -> bool:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return False
         if isinstance(ctx.author, discord.Member):
             perms = ctx.author.guild_permissions
             if perms.administrator or perms.manage_guild:
                 return True
-        await ctx.respond("You need `Manage Server` permission to run this command.", ephemeral=True)
+        await ctx.respond(
+            "You need `Manage Server` permission to run this command.", ephemeral=True
+        )
         return False
 
-    @bot.slash_command(name="chronicle_cleanup_now", description="Delete old session artifacts by retention policy")
+    @bot.slash_command(
+        name="chronicle_cleanup_now",
+        description="Delete old session artifacts by retention policy",
+    )
     async def chronicle_cleanup_now(ctx: discord.ApplicationContext) -> None:
         if not await require_manage_guild(ctx):
             return
         if not settings.auto_cleanup_enabled:
-            await ctx.respond("Cleanup is disabled (`AUTO_CLEANUP_ENABLED=false`).", ephemeral=True)
+            await ctx.respond(
+                "Cleanup is disabled (`AUTO_CLEANUP_ENABLED=false`).", ephemeral=True
+            )
             return
         started = time.perf_counter()
         removed_sessions, removed_bytes = cleanup_old_sessions(settings.retention_days)
@@ -1152,7 +1254,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             ephemeral=True,
         )
 
-    @bot.slash_command(name="chronicle_purge_session", description="Delete one saved session by ID")
+    @bot.slash_command(
+        name="chronicle_purge_session", description="Delete one saved session by ID"
+    )
     async def chronicle_purge_session(
         ctx: discord.ApplicationContext,
         session_id: str = discord.Option(
@@ -1164,7 +1268,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         if not await require_manage_guild(ctx):
             return
         if not settings.allow_purge_commands:
-            await ctx.respond("Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).", ephemeral=True)
+            await ctx.respond(
+                "Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).",
+                ephemeral=True,
+            )
             return
         if ctx.guild is None:
             return
@@ -1176,11 +1283,16 @@ def build_bot(settings: Settings) -> commands.Bot:
         try:
             shutil.rmtree(session_dir)
         except OSError as exc:
-            await ctx.respond(f"Failed to delete `{session_id}`: `{exc}`", ephemeral=True)
+            await ctx.respond(
+                f"Failed to delete `{session_id}`: `{exc}`", ephemeral=True
+            )
             return
         await ctx.respond(f"Session `{session_id}` deleted.", ephemeral=True)
 
-    @bot.slash_command(name="chronicle_purge_guild_data", description="Delete all saved data for this guild")
+    @bot.slash_command(
+        name="chronicle_purge_guild_data",
+        description="Delete all saved data for this guild",
+    )
     async def chronicle_purge_guild_data(
         ctx: discord.ApplicationContext,
         confirm: str = discord.Option(
@@ -1192,12 +1304,17 @@ def build_bot(settings: Settings) -> commands.Bot:
         if not await require_manage_guild(ctx):
             return
         if not settings.allow_purge_commands:
-            await ctx.respond("Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).", ephemeral=True)
+            await ctx.respond(
+                "Purge commands are disabled (`ALLOW_PURGE_COMMANDS=false`).",
+                ephemeral=True,
+            )
             return
         if ctx.guild is None:
             return
         if confirm.strip() != "PURGE":
-            await ctx.respond("Confirmation failed. Type exactly `PURGE`.", ephemeral=True)
+            await ctx.respond(
+                "Confirmation failed. Type exactly `PURGE`.", ephemeral=True
+            )
             return
         guild_sessions_dir = settings.data_dir / "sessions" / str(ctx.guild.id)
         if not guild_sessions_dir.exists():
@@ -1208,9 +1325,13 @@ def build_bot(settings: Settings) -> commands.Bot:
         except OSError as exc:
             await ctx.respond(f"Failed to purge guild data: `{exc}`", ephemeral=True)
             return
-        await ctx.respond("All saved guild session data has been deleted.", ephemeral=True)
+        await ctx.respond(
+            "All saved guild session data has been deleted.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_setup", description="Set text channel for chronicle reports")
+    @bot.slash_command(
+        name="chronicle_setup", description="Set text channel for chronicle reports"
+    )
     async def chronicle_setup(
         ctx: discord.ApplicationContext,
         channel: discord.TextChannel = discord.Option(
@@ -1221,7 +1342,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         ),
     ) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         resolved_channel = resolve_text_channel(ctx, channel)
@@ -1234,17 +1357,29 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
 
         store.set_chronicle_channel(ctx.guild.id, resolved_channel.id)
-        await ctx.respond(f"Chronicle channel set to {resolved_channel.mention}.", ephemeral=True)
+        await ctx.respond(
+            f"Chronicle channel set to {resolved_channel.mention}.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_setup_here", description="Set current text channel for chronicle reports")
+    @bot.slash_command(
+        name="chronicle_setup_here",
+        description="Set current text channel for chronicle reports",
+    )
     async def chronicle_setup_here(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None or not isinstance(ctx.channel, discord.TextChannel):
-            await ctx.respond("Run this command from a server text channel.", ephemeral=True)
+            await ctx.respond(
+                "Run this command from a server text channel.", ephemeral=True
+            )
             return
         store.set_chronicle_channel(ctx.guild.id, ctx.channel.id)
-        await ctx.respond(f"Chronicle channel set to {ctx.channel.mention}.", ephemeral=True)
+        await ctx.respond(
+            f"Chronicle channel set to {ctx.channel.mention}.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_setup_voice", description="Set default voice channel for recording")
+    @bot.slash_command(
+        name="chronicle_setup_voice",
+        description="Set default voice channel for recording",
+    )
     async def chronicle_setup_voice(
         ctx: discord.ApplicationContext,
         channel: discord.VoiceChannel = discord.Option(
@@ -1255,7 +1390,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         ),
     ) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         resolved_channel = resolve_voice_channel(ctx, channel)
@@ -1268,9 +1405,14 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
 
         store.set_voice_channel(ctx.guild.id, resolved_channel.id)
-        await ctx.respond(f"Default voice channel set to {resolved_channel.mention}.", ephemeral=True)
+        await ctx.respond(
+            f"Default voice channel set to {resolved_channel.mention}.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_setup_channels", description="Set both voice and transcript text channels")
+    @bot.slash_command(
+        name="chronicle_setup_channels",
+        description="Set both voice and transcript text channels",
+    )
     async def chronicle_setup_channels(
         ctx: discord.ApplicationContext,
         voice_channel: discord.VoiceChannel = discord.Option(
@@ -1287,13 +1429,18 @@ def build_bot(settings: Settings) -> commands.Bot:
         ),
     ) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         resolved_voice = resolve_voice_channel(ctx, voice_channel)
         resolved_text = resolve_text_channel(ctx, transcript_channel)
         if resolved_voice is None or resolved_text is None:
-            await ctx.respond("Could not resolve one or both channels from the selected values.", ephemeral=True)
+            await ctx.respond(
+                "Could not resolve one or both channels from the selected values.",
+                ephemeral=True,
+            )
             return
 
         store.set_voice_channel(ctx.guild.id, resolved_voice.id)
@@ -1303,7 +1450,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             ephemeral=True,
         )
 
-    @bot.slash_command(name="chronicle_setup_language", description="Set language for generated session summary")
+    @bot.slash_command(
+        name="chronicle_setup_language",
+        description="Set language for generated session summary",
+    )
     async def chronicle_setup_language(
         ctx: discord.ApplicationContext,
         language: str = discord.Option(
@@ -1314,22 +1464,32 @@ def build_bot(settings: Settings) -> commands.Bot:
         ),
     ) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
         store.set_summary_language(ctx.guild.id, language)
         await ctx.respond(f"Summary language set to `{language}`.", ephemeral=True)
 
-    @bot.slash_command(name="chronicle_status", description="Show recorder status and health counters")
+    @bot.slash_command(
+        name="chronicle_status", description="Show recorder status and health counters"
+    )
     async def chronicle_status(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         configured_voice_id = store.get_voice_channel(ctx.guild.id)
-        configured_voice = ctx.guild.get_channel(configured_voice_id) if configured_voice_id else None
+        configured_voice = (
+            ctx.guild.get_channel(configured_voice_id) if configured_voice_id else None
+        )
         configured_text_id = store.get_chronicle_channel(ctx.guild.id)
-        configured_text = ctx.guild.get_channel(configured_text_id) if configured_text_id else None
+        configured_text = (
+            ctx.guild.get_channel(configured_text_id) if configured_text_id else None
+        )
         voice_client = ctx.guild.voice_client
         lines = ["## Chronicle Status"]
         lines.append(f"- Recording active: `{state.sink is not None}`")
@@ -1406,21 +1566,29 @@ def build_bot(settings: Settings) -> commands.Bot:
         if not await require_manage_guild(ctx):
             return
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
         await ctx.defer(ephemeral=True)
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         if state.sink is not None:
-            await ctx.followup.send("Cannot reprocess while recording is active.", ephemeral=True)
+            await ctx.followup.send(
+                "Cannot reprocess while recording is active.", ephemeral=True
+            )
             return
         if state.processing:
-            await ctx.followup.send("Another processing task is already running.", ephemeral=True)
+            await ctx.followup.send(
+                "Another processing task is already running.", ephemeral=True
+            )
             return
 
         session_dir = latest_session_dir_for_guild(ctx.guild.id)
         if session_dir is None:
-            await ctx.followup.send("No saved sessions found for this guild.", ephemeral=True)
+            await ctx.followup.send(
+                "No saved sessions found for this guild.", ephemeral=True
+            )
             return
 
         chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
@@ -1463,7 +1631,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                 mp3_paths = [
                     str(item.audio_path)
                     for item in artifacts.speaker_transcripts
-                    if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
+                    if item.audio_path.suffix.lower() == ".mp3"
+                    and item.audio_path.exists()
                 ]
                 if mp3_paths:
                     await try_send_files(
@@ -1479,12 +1648,20 @@ def build_bot(settings: Settings) -> commands.Bot:
                 session_dir,
                 time.perf_counter() - started,
             )
-            await ctx.followup.send(f"Reprocessed `{session_dir.name}` successfully.", ephemeral=True)
+            await ctx.followup.send(
+                f"Reprocessed `{session_dir.name}` successfully.", ephemeral=True
+            )
         except TimeoutError:
-            await try_send(target_channel, "Reprocess timed out. Check Whisper/LLM availability.")
+            await try_send(
+                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+            )
             await ctx.followup.send("Reprocess timed out.", ephemeral=True)
         except Exception as exc:
-            logger.exception("[reprocess] command_failed guild_id=%s session_dir=%s", ctx.guild.id, session_dir)
+            logger.exception(
+                "[reprocess] command_failed guild_id=%s session_dir=%s",
+                ctx.guild.id,
+                session_dir,
+            )
             await try_send(target_channel, f"Reprocess failed: `{exc}`")
             await ctx.followup.send(f"Reprocess failed: `{exc}`", ephemeral=True)
         finally:
@@ -1496,14 +1673,18 @@ def build_bot(settings: Settings) -> commands.Bot:
     )
     async def chronicle_reconnect(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
         await ctx.defer(ephemeral=True)
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         target_channel: VoiceLikeChannel | None = None
         if state.voice_channel_id is not None:
-            target_channel = _as_voice_like(ctx.guild.get_channel(state.voice_channel_id))
+            target_channel = _as_voice_like(
+                ctx.guild.get_channel(state.voice_channel_id)
+            )
         if target_channel is None:
             configured = store.get_voice_channel(ctx.guild.id)
             if configured is not None:
@@ -1522,7 +1703,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 await ctx.guild.voice_client.disconnect(force=True)
                 await asyncio.sleep(0.5)
 
-            voice_client = await connect_voice_with_retry(ctx.guild, target_channel, attempts=3)
+            voice_client = await connect_voice_with_retry(
+                ctx.guild, target_channel, attempts=3
+            )
             if not await wait_voice_ready(voice_client, timeout_s=20.0):
                 raise RuntimeError("Voice connection did not become ready in time.")
 
@@ -1568,7 +1751,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     status="recording",
                     voice_channel_id=target_channel.id,
                     chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
-                    segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                    segment_count=(len(state.segment_sinks) + 1)
+                    if state.segment_sinks
+                    else 1,
                     finalizing=False,
                 )
                 resumed = True
@@ -1587,10 +1772,14 @@ def build_bot(settings: Settings) -> commands.Bot:
             logger.exception("[reconnect] manual_failed guild_id=%s", ctx.guild.id)
             await ctx.followup.send(f"Manual reconnect failed: `{exc}`", ephemeral=True)
 
-    @bot.slash_command(name="chronicle_list_voice", description="List voice/stage channels with IDs")
+    @bot.slash_command(
+        name="chronicle_list_voice", description="List voice/stage channels with IDs"
+    )
     async def chronicle_list_voice(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         items: list[str] = []
@@ -1603,7 +1792,10 @@ def build_bot(settings: Settings) -> commands.Bot:
 
         await ctx.respond("Voice channels:\n" + "\n".join(items), ephemeral=True)
 
-    @bot.slash_command(name="chronicle_setup_voice_here", description="Use your current voice channel as default")
+    @bot.slash_command(
+        name="chronicle_setup_voice_here",
+        description="Use your current voice channel as default",
+    )
     async def chronicle_setup_voice_here(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
             await ctx.respond("Join a voice channel first.", ephemeral=True)
@@ -1614,12 +1806,19 @@ def build_bot(settings: Settings) -> commands.Bot:
             await ctx.respond("Join a voice channel first.", ephemeral=True)
             return
         store.set_voice_channel(ctx.guild.id, voice_channel.id)
-        await ctx.respond(f"Default voice channel set to {voice_channel.mention}.", ephemeral=True)
+        await ctx.respond(
+            f"Default voice channel set to {voice_channel.mention}.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_start", description="Join your voice channel and start recording")
+    @bot.slash_command(
+        name="chronicle_start",
+        description="Join your voice channel and start recording",
+    )
     async def chronicle_start(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None or ctx.user is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
         await ctx.defer(ephemeral=True)
 
@@ -1651,10 +1850,14 @@ def build_bot(settings: Settings) -> commands.Bot:
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         if state.sink is not None:
-            await ctx.followup.send("Recording already running for this guild.", ephemeral=True)
+            await ctx.followup.send(
+                "Recording already running for this guild.", ephemeral=True
+            )
             return
         if state.processing:
-            await ctx.followup.send("Previous recording is still processing.", ephemeral=True)
+            await ctx.followup.send(
+                "Previous recording is still processing.", ephemeral=True
+            )
             return
         state.started_at_utc = datetime.now(UTC)
         state.finalizing = False
@@ -1685,7 +1888,11 @@ def build_bot(settings: Settings) -> commands.Bot:
             fallback_channel: discord.abc.Messageable,
             guild_id: int,
         ) -> None:
-            logger.info("[on_finished] called guild=%s tracks=%s", guild_id, len(finished_sink.audio_data))
+            logger.info(
+                "[on_finished] called guild=%s tracks=%s",
+                guild_id,
+                len(finished_sink.audio_data),
+            )
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
             append_segment_sink_if_needed(state, finished_sink)
@@ -1706,13 +1913,22 @@ def build_bot(settings: Settings) -> commands.Bot:
             # Rotation stop: restart next segment instead of processing final output.
             if not state.finalizing:
                 try:
-                    target_voice = guild.get_channel(state.voice_channel_id) if state.voice_channel_id else None
+                    target_voice = (
+                        guild.get_channel(state.voice_channel_id)
+                        if state.voice_channel_id
+                        else None
+                    )
                     target_voice = _as_voice_like(target_voice)
                     if target_voice is None:
                         state.rotation_failed += 1
-                        await try_send(target_channel, "Rotation failed: voice channel is no longer available.")
+                        await try_send(
+                            target_channel,
+                            "Rotation failed: voice channel is no longer available.",
+                        )
                         return
-                    recovered_client = await connect_voice_with_retry(guild, target_voice, attempts=3)
+                    recovered_client = await connect_voice_with_retry(
+                        guild, target_voice, attempts=3
+                    )
                     next_sink = discord.sinks.WaveSink()
                     state.sink = next_sink
                     await asyncio.sleep(1.0)
@@ -1729,11 +1945,15 @@ def build_bot(settings: Settings) -> commands.Bot:
                         status="recording",
                         voice_channel_id=target_voice.id,
                         chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                        segment_count=(len(state.segment_sinks) + 1) if state.segment_sinks else 1,
+                        segment_count=(len(state.segment_sinks) + 1)
+                        if state.segment_sinks
+                        else 1,
                         finalizing=False,
                     )
                     state.rotation_resumed += 1
-                    await try_send(target_channel, "Recording segment rotated and resumed.")
+                    await try_send(
+                        target_channel, "Recording segment rotated and resumed."
+                    )
                 except Exception as exc:
                     state.rotation_failed += 1
                     await try_send(
@@ -1747,18 +1967,26 @@ def build_bot(settings: Settings) -> commands.Bot:
             try:
                 if not state.segment_sinks:
                     sent_no_audio = await try_send(
-                        target_channel, "Recording finished, but no audio data was captured."
+                        target_channel,
+                        "Recording finished, but no audio data was captured.",
                     )
                     if not sent_no_audio and target_channel is not fallback_channel:
                         await try_send(
-                            fallback_channel, "Recording finished, but no audio data was captured."
+                            fallback_channel,
+                            "Recording finished, but no audio data was captured.",
                         )
                     logger.warning("[on_finished] no audio captured guild=%s", guild_id)
                     return
 
-                sent = await try_send(target_channel, "Processing recording: Whisper transcription + local LLM summary...")
+                sent = await try_send(
+                    target_channel,
+                    "Processing recording: Whisper transcription + local LLM summary...",
+                )
                 if not sent and target_channel is not fallback_channel:
-                    await try_send(fallback_channel, "Processing recording: Whisper transcription + local LLM summary...")
+                    await try_send(
+                        fallback_channel,
+                        "Processing recording: Whisper transcription + local LLM summary...",
+                    )
                 summary_language = store.get_summary_language(guild_id, default="ru")
                 logger.info(
                     "[session] processing_begin guild_id=%s segments=%s language=%s timeout_s=%s",
@@ -1768,14 +1996,20 @@ def build_bot(settings: Settings) -> commands.Bot:
                     settings.processing_timeout_seconds,
                 )
                 artifacts = await asyncio.wait_for(
-                    processor.process_sinks(guild, state.segment_sinks, summary_language=summary_language),
+                    processor.process_sinks(
+                        guild, state.segment_sinks, summary_language=summary_language
+                    ),
                     timeout=settings.processing_timeout_seconds,
                 )
 
-                posted = await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
+                posted = await try_send(
+                    target_channel, f"Session saved: `{artifacts.session_dir}`"
+                )
                 if not posted and target_channel is not fallback_channel:
                     target_channel = fallback_channel
-                    await try_send(target_channel, f"Session saved: `{artifacts.session_dir}`")
+                    await try_send(
+                        target_channel, f"Session saved: `{artifacts.session_dir}`"
+                    )
                 transcript_sent = await try_send_file(
                     target_channel,
                     str(artifacts.full_transcript_txt_path),
@@ -1806,7 +2040,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                     mp3_paths = [
                         str(item.audio_path)
                         for item in artifacts.speaker_transcripts
-                        if item.audio_path.suffix.lower() == ".mp3" and item.audio_path.exists()
+                        if item.audio_path.suffix.lower() == ".mp3"
+                        and item.audio_path.exists()
                     ]
                     if mp3_paths:
                         sent_count = await try_send_files(
@@ -1841,7 +2076,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                     if target_channel is not fallback_channel:
                         await send_long(fallback_channel, artifacts.summary_markdown)
-                quality_report = await build_quality_report(state, artifacts.speaker_transcripts)
+                quality_report = await build_quality_report(
+                    state, artifacts.speaker_transcripts
+                )
                 await try_send(target_channel, quality_report)
             except TimeoutError:
                 logger.warning(
@@ -1854,9 +2091,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                     "Processing timed out. Check Whisper/LLM availability and bot logs.",
                 )
             except Exception as exc:
-                sent = await try_send(fallback_channel, f"Error while processing recording: `{exc}`")
+                sent = await try_send(
+                    fallback_channel, f"Error while processing recording: `{exc}`"
+                )
                 if not sent:
-                    logger.exception("[on_finished] processing error guild=%s", guild_id)
+                    logger.exception(
+                        "[on_finished] processing error guild=%s", guild_id
+                    )
             finally:
                 state.processing = False
                 state.finalizing = False
@@ -1888,7 +2129,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.done_callback = on_finished
             state.fallback_channel = ctx.channel
             state.health_task = asyncio.create_task(
-                monitor_voice_health(ctx.guild.id, voice_channel, ctx.channel, on_finished)
+                monitor_voice_health(
+                    ctx.guild.id, voice_channel, ctx.channel, on_finished
+                )
             )
             state.rotation_task = asyncio.create_task(
                 rotation_loop(ctx.guild.id, ctx.channel, on_finished)
@@ -1936,12 +2179,18 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             return
 
-        await ctx.followup.send(f"Recording started in {voice_channel.mention}.", ephemeral=True)
+        await ctx.followup.send(
+            f"Recording started in {voice_channel.mention}.", ephemeral=True
+        )
 
-    @bot.slash_command(name="chronicle_stop", description="Stop recording and build chronicle")
+    @bot.slash_command(
+        name="chronicle_stop", description="Stop recording and build chronicle"
+    )
     async def chronicle_stop(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None:
-            await ctx.respond("This command can be used only in a server.", ephemeral=True)
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
             return
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
@@ -1962,7 +2211,9 @@ def build_bot(settings: Settings) -> commands.Bot:
         voice_client.stop_recording()
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
-    @bot.slash_command(name="chronicle_leave", description="Disconnect bot from voice channel")
+    @bot.slash_command(
+        name="chronicle_leave", description="Disconnect bot from voice channel"
+    )
     async def chronicle_leave(ctx: discord.ApplicationContext) -> None:
         if ctx.guild is None or ctx.guild.voice_client is None:
             await ctx.respond("Bot is not in a voice channel.", ephemeral=True)

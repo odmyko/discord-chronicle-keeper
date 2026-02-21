@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from io import BytesIO
@@ -112,7 +112,9 @@ async def _run_pipeline(tmp_path: Path) -> None:
     assert artifacts.session_dir.exists()
     assert artifacts.full_transcript_txt_path.exists()
     assert artifacts.summary_path.exists()
-    assert "johngalt (123)" in artifacts.full_transcript_txt_path.read_text(encoding="utf-8")
+    assert "johngalt (123)" in artifacts.full_transcript_txt_path.read_text(
+        encoding="utf-8"
+    )
     assert "# Session Summary" in artifacts.summary_markdown
 
 

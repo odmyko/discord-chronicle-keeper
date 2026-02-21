@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from chronicle_keeper.processor import SessionProcessor, SpeakerTranscript, sanitize_name
+from chronicle_keeper.processor import (
+    SessionProcessor,
+    SpeakerTranscript,
+    sanitize_name,
+)
 
 
 def test_sanitize_name():
@@ -36,7 +40,9 @@ def test_build_transcript_text():
 
 
 def test_parse_saved_audio_filename():
-    parsed = SessionProcessor._parse_saved_audio_filename(Path("johngalt_451102877562306570_seg002.mp3"))
+    parsed = SessionProcessor._parse_saved_audio_filename(
+        Path("johngalt_451102877562306570_seg002.mp3")
+    )
     assert parsed is not None
     assert parsed.speaker_name == "johngalt"
     assert parsed.user_id == 451102877562306570

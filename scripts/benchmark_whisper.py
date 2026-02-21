@@ -11,7 +11,9 @@ import aiohttp
 
 
 def find_latest_mp3(root: Path) -> Path | None:
-    candidates = sorted(root.rglob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = sorted(
+        root.rglob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     if not candidates:
         return None
     for path in candidates:
@@ -56,40 +58,79 @@ async def _single_run(
 ) -> tuple[int, str]:
     form = aiohttp.FormData()
     with audio_path.open("rb") as fh:
-        content_type = "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        content_type = (
+            "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        )
         if api_style == "openai":
-            form.add_field("file", fh, filename=audio_path.name, content_type=content_type)
+            form.add_field(
+                "file", fh, filename=audio_path.name, content_type=content_type
+            )
             form.add_field("model", model)
             form.add_field("response_format", "verbose_json")
             form.add_field("timestamp_granularities[]", "segment")
             if params.get("language"):
                 form.add_field("language", params["language"])
         else:
-            form.add_field("audio_file", fh, filename=audio_path.name, content_type=content_type)
+            form.add_field(
+                "audio_file", fh, filename=audio_path.name, content_type=content_type
+            )
         async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, params=params, data=form, timeout=600) as response:
+            async with session.post(
+                endpoint, params=params, data=form, timeout=600
+            ) as response:
                 return response.status, await response.text()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark Whisper endpoint on a real recorded mp3.")
-    parser.add_argument("--whisper-url", default="http://127.0.0.1:9000", help="Whisper base URL")
-    parser.add_argument("--api-style", choices=["asr", "openai"], default="asr", help="ASR endpoint style")
+    parser = argparse.ArgumentParser(
+        description="Benchmark Whisper endpoint on a real recorded mp3."
+    )
+    parser.add_argument(
+        "--whisper-url", default="http://127.0.0.1:9000", help="Whisper base URL"
+    )
+    parser.add_argument(
+        "--api-style",
+        choices=["asr", "openai"],
+        default="asr",
+        help="ASR endpoint style",
+    )
     parser.add_argument("--asr-path", default="/asr", help="ASR path")
-    parser.add_argument("--model", default="openai/whisper-large-v3-turbo", help="Model name for openai API style")
-    parser.add_argument("--audio", type=Path, default=None, help="Input audio file (.mp3/.wav)")
-    parser.add_argument("--search-root", type=Path, default=Path("data/sessions"), help="Where to find latest mp3")
-    parser.add_argument("--language", default="ru", help="language query param for Whisper")
+    parser.add_argument(
+        "--model",
+        default="openai/whisper-large-v3-turbo",
+        help="Model name for openai API style",
+    )
+    parser.add_argument(
+        "--audio", type=Path, default=None, help="Input audio file (.mp3/.wav)"
+    )
+    parser.add_argument(
+        "--search-root",
+        type=Path,
+        default=Path("data/sessions"),
+        help="Where to find latest mp3",
+    )
+    parser.add_argument(
+        "--language", default="ru", help="language query param for Whisper"
+    )
     parser.add_argument("--task", default="transcribe", help="Whisper task")
-    parser.add_argument("--encode", default="true", choices=["true", "false"], help="Whisper encode query param")
-    parser.add_argument("--runs", type=int, default=1, help="How many benchmark runs to perform")
+    parser.add_argument(
+        "--encode",
+        default="true",
+        choices=["true", "false"],
+        help="Whisper encode query param",
+    )
+    parser.add_argument(
+        "--runs", type=int, default=1, help="How many benchmark runs to perform"
+    )
     args = parser.parse_args()
 
     audio_path = args.audio
     if audio_path is None:
         audio_path = find_latest_mp3(args.search_root)
     if audio_path is None or not audio_path.exists():
-        raise SystemExit("No audio file found. Provide --audio or place mp3 files under data/sessions.")
+        raise SystemExit(
+            "No audio file found. Provide --audio or place mp3 files under data/sessions."
+        )
 
     endpoint = f"{args.whisper_url.rstrip('/')}{args.asr_path}"
     if args.api_style == "openai":
@@ -113,7 +154,9 @@ def main() -> int:
     timings: list[float] = []
     for idx in range(1, max(1, args.runs) + 1):
         started = time.perf_counter()
-        status, body = asyncio.run(_single_run(endpoint, args.api_style, params, args.model, audio_path))
+        status, body = asyncio.run(
+            _single_run(endpoint, args.api_style, params, args.model, audio_path)
+        )
         elapsed = time.perf_counter() - started
         timings.append(elapsed)
 

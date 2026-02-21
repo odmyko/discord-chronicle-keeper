@@ -10,7 +10,9 @@ from chronicle_keeper.llm_client import LLMClient
 from chronicle_keeper.whisper_client import WhisperClient
 
 
-def _make_settings(port: int, api_style: str = "asr", asr_path: str = "/asr") -> SimpleNamespace:
+def _make_settings(
+    port: int, api_style: str = "asr", asr_path: str = "/asr"
+) -> SimpleNamespace:
     return SimpleNamespace(
         whisper_base_url=f"http://127.0.0.1:{port}",
         whisper_api_style=api_style,
@@ -55,7 +57,9 @@ def test_whisper_uses_segment_fallback(tmp_path: Path) -> None:
 
     async def _run() -> None:
         async def asr_handler(request: web.Request) -> web.Response:
-            return web.json_response({"segments": [{"text": "hello"}, {"text": "world"}]})
+            return web.json_response(
+                {"segments": [{"text": "hello"}, {"text": "world"}]}
+            )
 
         app = web.Application()
         app.router.add_post("/asr", asr_handler)
@@ -165,10 +169,17 @@ def test_whisper_fallback_on_low_quality_result(tmp_path: Path) -> None:
 
     async def _run() -> None:
         async def primary_handler(request: web.Request) -> web.Response:
-            return web.json_response({"text": "ok", "segments": [{"start": 0.0, "end": 0.2, "text": "ok"}]})
+            return web.json_response(
+                {"text": "ok", "segments": [{"start": 0.0, "end": 0.2, "text": "ok"}]}
+            )
 
         async def fallback_handler(request: web.Request) -> web.Response:
-            return web.json_response({"text": "this fallback transcript is clearly richer", "segments": [{"start": 0.0, "end": 1.0, "text": "fallback richer"}]})
+            return web.json_response(
+                {
+                    "text": "this fallback transcript is clearly richer",
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "fallback richer"}],
+                }
+            )
 
         app_primary = web.Application()
         app_primary.router.add_post("/asr", primary_handler)
@@ -242,7 +253,15 @@ def test_llm_summary_normalizes_missing_sections() -> None:
     async def _run() -> None:
         async def llm_handler(request: web.Request) -> web.Response:
             return web.json_response(
-                {"choices": [{"message": {"content": "Only one loose paragraph without headers."}}]}
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Only one loose paragraph without headers."
+                            }
+                        }
+                    ]
+                }
             )
 
         app = web.Application()

@@ -10,11 +10,17 @@ class Handler(BaseHTTPRequestHandler):
         if length > 0:
             _ = self.rfile.read(length)
 
-        if self.path.startswith("/asr") or self.path.startswith("/v1/audio/transcriptions"):
+        if self.path.startswith("/asr") or self.path.startswith(
+            "/v1/audio/transcriptions"
+        ):
             payload = {
                 "text": "Smoke transcript from mock ASR.",
                 "segments": [
-                    {"start": 0.0, "end": 1.0, "text": "Smoke transcript from mock ASR."},
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Smoke transcript from mock ASR.",
+                    },
                 ],
             }
             return self._write_json(200, payload)
@@ -64,4 +70,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

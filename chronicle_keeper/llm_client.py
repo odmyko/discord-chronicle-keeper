@@ -33,7 +33,9 @@ class LLMClient:
             "- You may add light dramatic phrasing, but preserve factual accuracy.\n"
         )
 
-    async def _chat(self, system_prompt: str, user_prompt: str, timeout_seconds: int = 600) -> str:
+    async def _chat(
+        self, system_prompt: str, user_prompt: str, timeout_seconds: int = 600
+    ) -> str:
         endpoint = f"{self._base_url}/chat/completions"
         payload = {
             "model": self._model,
@@ -46,7 +48,11 @@ class LLMClient:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload, timeout=timeout_seconds) as resp:
+            async with session.post(
+                endpoint,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+            ) as resp:
                 body = await resp.json(content_type=None)
                 if resp.status >= 400:
                     raise RuntimeError(f"LLM error {resp.status}: {body}")
@@ -74,11 +80,17 @@ class LLMClient:
         # Collect existing top-level sections from model output.
         section_positions = []
         for match in re.finditer(r"(?m)^#\s+(.+?)\s*$", text):
-            section_positions.append((match.start(), match.end(), match.group(1).strip()))
+            section_positions.append(
+                (match.start(), match.end(), match.group(1).strip())
+            )
 
         extracted: dict[str, str] = {}
         for idx, (_, title_end, title) in enumerate(section_positions):
-            next_start = section_positions[idx + 1][0] if idx + 1 < len(section_positions) else len(text)
+            next_start = (
+                section_positions[idx + 1][0]
+                if idx + 1 < len(section_positions)
+                else len(text)
+            )
             body = text[title_end:next_start].strip()
             normalized_title = title.lower()
             for required in cls._SUMMARY_SECTIONS:
@@ -149,7 +161,9 @@ class LLMClient:
         )
         return await self._chat(system_prompt, user_prompt)
 
-    async def combine_chunk_summaries(self, chunk_summaries_markdown: str, language: str = "ru") -> str:
+    async def combine_chunk_summaries(
+        self, chunk_summaries_markdown: str, language: str = "ru"
+    ) -> str:
         lang = (language or "ru").lower().strip()
         if lang not in {"en", "uk", "ru"}:
             lang = "ru"

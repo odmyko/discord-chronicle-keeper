@@ -53,7 +53,15 @@ class WhisperClient:
         self._fallback = _ASRProfile(
             name="fallback",
             base_url=settings.whisper_fallback_base_url,
-            api_style=((settings.whisper_fallback_api_style or settings.whisper_api_style or "asr").strip().lower()),
+            api_style=(
+                (
+                    settings.whisper_fallback_api_style
+                    or settings.whisper_api_style
+                    or "asr"
+                )
+                .strip()
+                .lower()
+            ),
             asr_path=settings.whisper_fallback_asr_path,
             openai_model=settings.whisper_fallback_openai_model,
         )
@@ -70,7 +78,9 @@ class WhisperClient:
 
     async def transcribe_file_detailed(self, audio_path: Path) -> TranscriptResult:
         try:
-            primary = await self._transcribe_with_profile(audio_path, language=self._language, profile=self._primary)
+            primary = await self._transcribe_with_profile(
+                audio_path, language=self._language, profile=self._primary
+            )
             if (
                 self._fallback_enabled
                 and self._fallback_on_low_quality
@@ -91,7 +101,11 @@ class WhisperClient:
                     profile=self._fallback,
                 )
                 if self._score(fallback) >= self._score(primary):
-                    logger.info("[whisper] selected_fallback_result primary_score=%s fallback_score=%s", self._score(primary), self._score(fallback))
+                    logger.info(
+                        "[whisper] selected_fallback_result primary_score=%s fallback_score=%s",
+                        self._score(primary),
+                        self._score(fallback),
+                    )
                     return fallback
             return primary
         except Exception as primary_exc:
@@ -103,7 +117,9 @@ class WhisperClient:
                     self._primary.asr_path,
                     primary_exc,
                 )
-                return await self._transcribe_with_profile(audio_path, language=self._language, profile=self._fallback)
+                return await self._transcribe_with_profile(
+                    audio_path, language=self._language, profile=self._fallback
+                )
             raise
 
     def _score(self, result: TranscriptResult) -> int:
@@ -114,7 +130,10 @@ class WhisperClient:
         segments = len(result.segments)
         if self._low_quality_min_chars > 0 and text_chars < self._low_quality_min_chars:
             return True
-        if self._low_quality_min_segments > 0 and segments < self._low_quality_min_segments:
+        if (
+            self._low_quality_min_segments > 0
+            and segments < self._low_quality_min_segments
+        ):
             return True
         return False
 
@@ -124,7 +143,9 @@ class WhisperClient:
         language: str,
         profile: _ASRProfile,
     ) -> TranscriptResult:
-        text = await self._transcribe_once(audio_path, language=language, profile=profile)
+        text = await self._transcribe_once(
+            audio_path, language=language, profile=profile
+        )
         if text.text:
             return text
 
@@ -135,15 +156,21 @@ class WhisperClient:
                 return text
         return TranscriptResult(text="", segments=[])
 
-    async def _transcribe_once(self, audio_path: Path, language: str, profile: _ASRProfile) -> TranscriptResult:
+    async def _transcribe_once(
+        self, audio_path: Path, language: str, profile: _ASRProfile
+    ) -> TranscriptResult:
         endpoint = f"{profile.base_url}{profile.asr_path}"
         params: dict[str, str] = {}
         form = aiohttp.FormData()
-        content_type = "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        content_type = (
+            "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
+        )
 
         if profile.api_style == "openai":
             with audio_path.open("rb") as fh:
-                form.add_field("file", fh, filename=audio_path.name, content_type=content_type)
+                form.add_field(
+                    "file", fh, filename=audio_path.name, content_type=content_type
+                )
                 form.add_field("model", profile.openai_model)
                 form.add_field("response_format", "verbose_json")
                 form.add_field("timestamp_granularities[]", "segment")
@@ -156,10 +183,16 @@ class WhisperClient:
                     form.add_field("language", language)
                 async with aiohttp.ClientSession() as session:
                     try:
-                        async with session.post(endpoint, data=form, timeout=300) as resp:
+                        async with session.post(
+                            endpoint,
+                            data=form,
+                            timeout=aiohttp.ClientTimeout(total=300),
+                        ) as resp:
                             body = await resp.text()
                             if resp.status >= 400:
-                                raise RuntimeError(f"Whisper error {resp.status}: {body[:400]}")
+                                raise RuntimeError(
+                                    f"Whisper error {resp.status}: {body[:400]}"
+                                )
                     except TimeoutError:
                         raise RuntimeError("Whisper request timed out (300s).")
         else:
@@ -171,13 +204,25 @@ class WhisperClient:
             if language:
                 params["language"] = language
             with audio_path.open("rb") as fh:
-                form.add_field("audio_file", fh, filename=audio_path.name, content_type=content_type)
+                form.add_field(
+                    "audio_file",
+                    fh,
+                    filename=audio_path.name,
+                    content_type=content_type,
+                )
                 async with aiohttp.ClientSession() as session:
                     try:
-                        async with session.post(endpoint, params=params, data=form, timeout=300) as resp:
+                        async with session.post(
+                            endpoint,
+                            params=params,
+                            data=form,
+                            timeout=aiohttp.ClientTimeout(total=300),
+                        ) as resp:
                             body = await resp.text()
                             if resp.status >= 400:
-                                raise RuntimeError(f"Whisper error {resp.status}: {body[:400]}")
+                                raise RuntimeError(
+                                    f"Whisper error {resp.status}: {body[:400]}"
+                                )
                     except TimeoutError:
                         raise RuntimeError("Whisper request timed out (300s).")
 
@@ -240,7 +285,9 @@ class WhisperClient:
                 wavf.setsampwidth(2)
                 wavf.setframerate(16000)
                 wavf.writeframes(b"\x00\x00" * 16000)
-            await self._transcribe_with_profile(Path(tmp_path), language=self._language, profile=self._primary)
+            await self._transcribe_with_profile(
+                Path(tmp_path), language=self._language, profile=self._primary
+            )
             return True, "ok"
         except Exception as exc:
             return False, str(exc)

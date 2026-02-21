@@ -19,7 +19,9 @@ class GuildSettingsStore:
             return {"guilds": {}}
 
     def _write(self, payload: dict[str, Any]) -> None:
-        self._file_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._file_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     def set_chronicle_channel(self, guild_id: int, channel_id: int) -> None:
         payload = self._read()

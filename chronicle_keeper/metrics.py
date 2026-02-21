@@ -47,4 +47,3 @@ class RuntimeMetrics:
                 }
                 for stage, metric in self._stages.items()
             }
-

@@ -56,4 +56,3 @@ Speech-oriented compression profile example:
   - `python scripts/smoke_e2e.py`
 - watch counters:
   - `/chronicle_status`
-

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -101,7 +101,9 @@ class SessionProcessor:
         sink: discord.sinks.Sink,
         summary_language: str = "ru",
     ) -> SessionArtifacts:
-        return await self.process_sinks(guild, [sink], summary_language=summary_language)
+        return await self.process_sinks(
+            guild, [sink], summary_language=summary_language
+        )
 
     async def process_sinks(
         self,
@@ -145,7 +147,9 @@ class SessionProcessor:
         self._write_checkpoint(checkpoint_path, checkpoint)
 
         speaker_items: list[SpeakerTranscript] = []
-        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
+        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
+            OrderedDict()
+        )
         timeline_entries: list[TimelineEntry] = []
         segment_audio_paths: dict[int, list[Path]] = {}
         segment_index = 0
@@ -154,8 +158,14 @@ class SessionProcessor:
             segment_index += 1
             for user_id, audio_data in sink.audio_data.items():
                 member = guild.get_member(int(user_id))
-                speaker_name = member.display_name if member else f"user_{user_id}"
-                base_name = f"{sanitize_name(speaker_name)}_{user_id}_seg{segment_index:03d}"
+                speaker_name = (
+                    getattr(member, "display_name", None)
+                    or getattr(member, "name", None)
+                    or f"user_{user_id}"
+                )
+                base_name = (
+                    f"{sanitize_name(speaker_name)}_{user_id}_seg{segment_index:03d}"
+                )
                 wav_path = audio_dir / f"{base_name}.wav"
 
                 file_obj = audio_data.file
@@ -180,7 +190,9 @@ class SessionProcessor:
                     )
                     asr_started = time.perf_counter()
                     try:
-                        timeline_result = await self._whisper.transcribe_file_detailed(wav_path)
+                        timeline_result = await self._whisper.transcribe_file_detailed(
+                            wav_path
+                        )
                     except Exception:
                         self._observe_metric("asr_transcribe", asr_started, False)
                         raise
@@ -199,7 +211,9 @@ class SessionProcessor:
                 )
                 asr_started = time.perf_counter()
                 try:
-                    content_result = await self._whisper.transcribe_file_detailed(compressed_path)
+                    content_result = await self._whisper.transcribe_file_detailed(
+                        compressed_path
+                    )
                 except Exception:
                     self._observe_metric("asr_transcribe", asr_started, False)
                     raise
@@ -213,7 +227,9 @@ class SessionProcessor:
                     len(transcript),
                 )
                 timeline_segments = (
-                    timeline_result.segments if timeline_result is not None else content_result.segments
+                    timeline_result.segments
+                    if timeline_result is not None
+                    else content_result.segments
                 )
                 timeline_entries.extend(
                     self._timeline_entries_from_segments(
@@ -224,7 +240,9 @@ class SessionProcessor:
                     )
                 )
                 transcript_path = transcript_dir / f"{base_name}.md"
-                transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
+                transcript_path.write_text(
+                    transcript or "_[no speech detected]_", encoding="utf-8"
+                )
                 speaker_items.append(
                     SpeakerTranscript(
                         user_id=int(user_id),
@@ -233,9 +251,13 @@ class SessionProcessor:
                         transcript=transcript,
                     )
                 )
-                segment_audio_paths.setdefault(segment_index, []).append(compressed_path)
+                segment_audio_paths.setdefault(segment_index, []).append(
+                    compressed_path
+                )
                 key = (int(user_id), speaker_name)
-                speaker_transcript_chunks.setdefault(key, []).append(transcript or "_[no speech detected]_")
+                speaker_transcript_chunks.setdefault(key, []).append(
+                    transcript or "_[no speech detected]_"
+                )
                 checkpoint["transcribed_tracks"] = len(speaker_items)
                 self._write_checkpoint(checkpoint_path, checkpoint)
 
@@ -251,17 +273,30 @@ class SessionProcessor:
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
         timeline_entries.sort(
-            key=lambda item: (item.segment_index, item.start_seconds, item.end_seconds, item.user_id)
+            key=lambda item: (
+                item.segment_index,
+                item.start_seconds,
+                item.end_seconds,
+                item.user_id,
+            )
         )
-        full_transcript = self._build_transcript_markdown(merged_items, timeline_entries)
-        (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
-        full_transcript_txt = self._build_transcript_text(merged_items, timeline_entries)
+        full_transcript = self._build_transcript_markdown(
+            merged_items, timeline_entries
+        )
+        (session_dir / "full_transcript.md").write_text(
+            full_transcript, encoding="utf-8"
+        )
+        full_transcript_txt = self._build_transcript_text(
+            merged_items, timeline_entries
+        )
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
         checkpoint["status"] = "summarizing"
         self._write_checkpoint(checkpoint_path, checkpoint)
 
-        chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
+        chunks = self._split_transcript_for_summary(
+            full_transcript, self._summary_chunk_chars
+        )
         checkpoint["summary_chunks_total"] = len(chunks)
         self._write_checkpoint(checkpoint_path, checkpoint)
         logger.info(
@@ -273,7 +308,9 @@ class SessionProcessor:
         if len(chunks) <= 1:
             llm_started = time.perf_counter()
             try:
-                summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+                summary_markdown = await self._llm.generate_summary(
+                    full_transcript, language=summary_language
+                )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
                 self._observe_metric("session_process", process_started, False)
@@ -322,7 +359,9 @@ class SessionProcessor:
         summary_path.write_text(summary_markdown, encoding="utf-8")
         mix_started = time.perf_counter()
         try:
-            mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+            mixed_audio_path = await self._build_mixed_session_audio(
+                audio_dir, segment_audio_paths
+            )
         except Exception:
             self._observe_metric("audio_mix", mix_started, False)
             self._observe_metric("session_process", process_started, False)
@@ -372,7 +411,9 @@ class SessionProcessor:
         )
 
         speaker_items: list[SpeakerTranscript] = []
-        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = OrderedDict()
+        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
+            OrderedDict()
+        )
         timeline_entries: list[TimelineEntry] = []
         segment_audio_paths: dict[int, list[Path]] = {}
         for entry in entries:
@@ -384,7 +425,9 @@ class SessionProcessor:
             )
             asr_started = time.perf_counter()
             try:
-                transcript_result = await self._whisper.transcribe_file_detailed(entry.path)
+                transcript_result = await self._whisper.transcribe_file_detailed(
+                    entry.path
+                )
             except Exception:
                 self._observe_metric("asr_transcribe", asr_started, False)
                 self._observe_metric("session_reprocess", reprocess_started, False)
@@ -406,7 +449,9 @@ class SessionProcessor:
                 )
             )
             transcript_path = transcript_dir / f"{entry.path.stem}.md"
-            transcript_path.write_text(transcript or "_[no speech detected]_", encoding="utf-8")
+            transcript_path.write_text(
+                transcript or "_[no speech detected]_", encoding="utf-8"
+            )
             speaker_items.append(
                 SpeakerTranscript(
                     user_id=entry.user_id,
@@ -417,7 +462,9 @@ class SessionProcessor:
             )
             segment_audio_paths.setdefault(entry.segment_index, []).append(entry.path)
             key = (entry.user_id, entry.speaker_name)
-            speaker_transcript_chunks.setdefault(key, []).append(transcript or "_[no speech detected]_")
+            speaker_transcript_chunks.setdefault(key, []).append(
+                transcript or "_[no speech detected]_"
+            )
 
         merged_items: list[SpeakerTranscript] = []
         for (user_id, speaker_name), chunks in speaker_transcript_chunks.items():
@@ -431,19 +478,34 @@ class SessionProcessor:
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
         timeline_entries.sort(
-            key=lambda item: (item.segment_index, item.start_seconds, item.end_seconds, item.user_id)
+            key=lambda item: (
+                item.segment_index,
+                item.start_seconds,
+                item.end_seconds,
+                item.user_id,
+            )
         )
-        full_transcript = self._build_transcript_markdown(merged_items, timeline_entries)
-        (session_dir / "full_transcript.md").write_text(full_transcript, encoding="utf-8")
-        full_transcript_txt = self._build_transcript_text(merged_items, timeline_entries)
+        full_transcript = self._build_transcript_markdown(
+            merged_items, timeline_entries
+        )
+        (session_dir / "full_transcript.md").write_text(
+            full_transcript, encoding="utf-8"
+        )
+        full_transcript_txt = self._build_transcript_text(
+            merged_items, timeline_entries
+        )
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
 
-        chunks = self._split_transcript_for_summary(full_transcript, self._summary_chunk_chars)
+        chunks = self._split_transcript_for_summary(
+            full_transcript, self._summary_chunk_chars
+        )
         if len(chunks) <= 1:
             llm_started = time.perf_counter()
             try:
-                summary_markdown = await self._llm.generate_summary(full_transcript, language=summary_language)
+                summary_markdown = await self._llm.generate_summary(
+                    full_transcript, language=summary_language
+                )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
                 self._observe_metric("session_reprocess", reprocess_started, False)
@@ -487,7 +549,9 @@ class SessionProcessor:
         summary_path.write_text(summary_markdown, encoding="utf-8")
         mix_started = time.perf_counter()
         try:
-            mixed_audio_path = await self._build_mixed_session_audio(audio_dir, segment_audio_paths)
+            mixed_audio_path = await self._build_mixed_session_audio(
+                audio_dir, segment_audio_paths
+            )
         except Exception:
             self._observe_metric("audio_mix", mix_started, False)
             self._observe_metric("session_reprocess", reprocess_started, False)
@@ -560,12 +624,16 @@ class SessionProcessor:
                 self._audio_vad_enabled,
             )
             return mp3_path
-        logger.warning("[processor] ffmpeg compression failed (code=%s), keeping WAV output", code)
+        logger.warning(
+            "[processor] ffmpeg compression failed (code=%s), keeping WAV output", code
+        )
         return wav_path
 
     @staticmethod
     def _write_checkpoint(path: Path, payload: dict) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     @staticmethod
     def _parse_saved_audio_filename(path: Path) -> SavedAudioEntry | None:
@@ -610,7 +678,14 @@ class SessionProcessor:
                     segment_index=fallback_index,
                 )
             entries.append(parsed)
-        entries.sort(key=lambda e: (e.user_id, e.speaker_name.lower(), e.segment_index, e.path.name))
+        entries.sort(
+            key=lambda e: (
+                e.user_id,
+                e.speaker_name.lower(),
+                e.segment_index,
+                e.path.name,
+            )
+        )
         return entries
 
     async def _build_mixed_session_audio(
@@ -670,7 +745,9 @@ class SessionProcessor:
         if code == 0 and mixed_output.exists():
             logger.info("[processor] built mixed session audio: %s", mixed_output.name)
             return mixed_output
-        logger.warning("[processor] failed to build mixed session audio (code=%s)", code)
+        logger.warning(
+            "[processor] failed to build mixed session audio (code=%s)", code
+        )
         return None
 
     async def _transcode_to_mp3(self, input_path: Path, output_path: Path) -> bool:
@@ -792,9 +869,9 @@ class SessionProcessor:
         lines.append("")
         lines.append("## Speaker Buckets")
         lines.append("")
-        for item in items:
-            lines.append(f"## {item.speaker_name} (`{item.user_id}`)")
-            lines.append(item.transcript or "_[no speech detected]_")
+        for speaker_item in items:
+            lines.append(f"## {speaker_item.speaker_name} (`{speaker_item.user_id}`)")
+            lines.append(speaker_item.transcript or "_[no speech detected]_")
             lines.append("")
         return "\n".join(lines).strip() + "\n"
 
@@ -820,8 +897,8 @@ class SessionProcessor:
         lines.append("")
         lines.append("Speaker Buckets")
         lines.append("")
-        for item in items:
-            lines.append(f"{item.speaker_name} ({item.user_id})")
-            lines.append(item.transcript or "[no speech detected]")
+        for speaker_item in items:
+            lines.append(f"{speaker_item.speaker_name} ({speaker_item.user_id})")
+            lines.append(speaker_item.transcript or "[no speech detected]")
             lines.append("")
         return "\n".join(lines).strip() + "\n"

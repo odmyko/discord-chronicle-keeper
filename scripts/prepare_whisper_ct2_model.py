@@ -53,7 +53,9 @@ def update_env_file(env_path: Path, model_dir_name: str) -> None:
 
     lines = _set_env_value(lines, "WHISPER_ASR_ENGINE", "faster_whisper")
     lines = _set_env_value(lines, "WHISPER_ASR_MODEL_PATH", "/models/whisper")
-    lines = _set_env_value(lines, "WHISPER_ASR_MODEL", f"/models/whisper/{model_dir_name}")
+    lines = _set_env_value(
+        lines, "WHISPER_ASR_MODEL", f"/models/whisper/{model_dir_name}"
+    )
 
     env_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 

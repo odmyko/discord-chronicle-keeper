@@ -7,4 +7,3 @@ COPY server.py /app/server.py
 EXPOSE 18080
 
 CMD ["python", "/app/server.py"]
-

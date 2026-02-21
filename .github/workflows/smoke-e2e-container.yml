@@ -60,4 +60,3 @@ jobs:
         run: |
           docker rm -f mock-api || true
           docker network rm smoke-net || true
-

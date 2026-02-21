@@ -1,2 +1,1 @@
 """Discord Chronicle Keeper package."""
-
