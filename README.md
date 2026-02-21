@@ -113,6 +113,11 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
   - `WHISPER_OPENAI_TEMPERATURE=0.0` for stable/deterministic transcripts.
   - `WHISPER_OPENAI_PROMPT=` to hint character names/lore vocabulary.
 - `WHISPER_WARMUP_ON_START=true` sends a tiny startup ASR request to reduce first real request latency.
+- Optional Whisper failover:
+  - `WHISPER_FALLBACK_ENABLED=true`
+  - `WHISPER_FALLBACK_BASE_URL=http://whisper:9000` (or another ASR endpoint)
+  - optional overrides: `WHISPER_FALLBACK_API_STYLE`, `WHISPER_FALLBACK_ASR_PATH`, `WHISPER_FALLBACK_OPENAI_MODEL`
+  - if primary ASR request fails, bot retries once via fallback target.
 - `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
@@ -170,10 +175,10 @@ This repo includes a full-stack compose setup:
 - `whisper_vllm` (optional profile): vLLM OpenAI-compatible transcription endpoint
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
-Start all services:
+Start stack with classic `/asr` Whisper backend:
 
 ```bash
-docker compose up -d --build
+docker compose --profile asr up -d --build
 ```
 
 If you previously used an `llm` service container, clean old compose objects first:
@@ -190,10 +195,10 @@ docker compose logs -f bot
 docker compose logs -f whisper
 ```
 
-Run optional vLLM Whisper endpoint (OpenAI transcription API):
+Start stack with vLLM Whisper backend (OpenAI transcription API):
 
 ```bash
-docker compose --profile vllm up -d --build whisper_vllm
+docker compose --profile vllm up -d --build
 docker compose logs -f whisper_vllm
 ```
 
@@ -225,6 +230,7 @@ Notes:
   - `LLM_MODEL` (selected model name)
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
+- On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
 
 ### Local Whisper Model (CT2)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import json
+import logging
 from pathlib import Path
 import tempfile
 import wave
@@ -10,6 +11,8 @@ import wave
 import aiohttp
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,13 +28,32 @@ class TranscriptResult:
     segments: list[TranscriptSegment]
 
 
+@dataclass(frozen=True)
+class _ASRProfile:
+    name: str
+    base_url: str
+    api_style: str
+    asr_path: str
+    openai_model: str
+
+
 class WhisperClient:
     def __init__(self, settings: Settings) -> None:
-        self._base_url = settings.whisper_base_url
-        api_style = (settings.whisper_api_style or "asr").strip().lower()
-        self._api_style = api_style if api_style in {"asr", "openai"} else "asr"
-        self._asr_path = settings.whisper_asr_path
-        self._openai_model = settings.whisper_openai_model
+        self._primary = _ASRProfile(
+            name="primary",
+            base_url=settings.whisper_base_url,
+            api_style=((settings.whisper_api_style or "asr").strip().lower()),
+            asr_path=settings.whisper_asr_path,
+            openai_model=settings.whisper_openai_model,
+        )
+        self._fallback_enabled = settings.whisper_fallback_enabled
+        self._fallback = _ASRProfile(
+            name="fallback",
+            base_url=settings.whisper_fallback_base_url,
+            api_style=((settings.whisper_fallback_api_style or settings.whisper_api_style or "asr").strip().lower()),
+            asr_path=settings.whisper_fallback_asr_path,
+            openai_model=settings.whisper_fallback_openai_model,
+        )
         self._openai_temperature = settings.whisper_openai_temperature
         self._openai_prompt = settings.whisper_openai_prompt
         self._language = settings.whisper_language
@@ -44,27 +66,47 @@ class WhisperClient:
         return result.text
 
     async def transcribe_file_detailed(self, audio_path: Path) -> TranscriptResult:
-        text = await self._transcribe_once(audio_path, language=self._language)
+        try:
+            return await self._transcribe_with_profile(audio_path, language=self._language, profile=self._primary)
+        except Exception as primary_exc:
+            if self._fallback_enabled and self._fallback.base_url:
+                logger.warning(
+                    "[whisper] primary_failed profile=%s endpoint=%s%s error=%s",
+                    self._primary.name,
+                    self._primary.base_url,
+                    self._primary.asr_path,
+                    primary_exc,
+                )
+                return await self._transcribe_with_profile(audio_path, language=self._language, profile=self._fallback)
+            raise
+
+    async def _transcribe_with_profile(
+        self,
+        audio_path: Path,
+        language: str,
+        profile: _ASRProfile,
+    ) -> TranscriptResult:
+        text = await self._transcribe_once(audio_path, language=language, profile=profile)
         if text.text:
             return text
 
         # Fallback: retry with auto language if configured language produced empty output.
         if self._language and self._language.lower() not in {"auto", "none"}:
-            text = await self._transcribe_once(audio_path, language="")
+            text = await self._transcribe_once(audio_path, language="", profile=profile)
             if text.text:
                 return text
         return TranscriptResult(text="", segments=[])
 
-    async def _transcribe_once(self, audio_path: Path, language: str) -> TranscriptResult:
-        endpoint = f"{self._base_url}{self._asr_path}"
+    async def _transcribe_once(self, audio_path: Path, language: str, profile: _ASRProfile) -> TranscriptResult:
+        endpoint = f"{profile.base_url}{profile.asr_path}"
         params: dict[str, str] = {}
         form = aiohttp.FormData()
         content_type = "audio/mpeg" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
 
-        if self._api_style == "openai":
+        if profile.api_style == "openai":
             with audio_path.open("rb") as fh:
                 form.add_field("file", fh, filename=audio_path.name, content_type=content_type)
-                form.add_field("model", self._openai_model)
+                form.add_field("model", profile.openai_model)
                 form.add_field("response_format", "verbose_json")
                 form.add_field("timestamp_granularities[]", "segment")
                 form.add_field("temperature", str(self._openai_temperature))
@@ -160,7 +202,7 @@ class WhisperClient:
                 wavf.setsampwidth(2)
                 wavf.setframerate(16000)
                 wavf.writeframes(b"\x00\x00" * 16000)
-            await self._transcribe_once(Path(tmp_path), language=self._language)
+            await self._transcribe_with_profile(Path(tmp_path), language=self._language, profile=self._primary)
             return True, "ok"
         except Exception as exc:
             return False, str(exc)

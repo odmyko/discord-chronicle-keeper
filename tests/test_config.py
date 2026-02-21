@@ -1,4 +1,4 @@
-from chronicle_keeper.config import load_settings
+from chronicle_keeper.config import config_doctor_issues, load_settings
 
 
 def test_load_settings_prefers_llm_aliases(monkeypatch):
@@ -59,6 +59,9 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.publish_per_speaker_audio is False
     assert settings.whisper_api_style == "asr"
     assert settings.whisper_openai_model == "openai/whisper-large-v3-turbo"
+    assert settings.whisper_fallback_enabled is False
+    assert settings.whisper_fallback_base_url == ""
+    assert settings.whisper_fallback_asr_path == "/asr"
     assert settings.llm_base_url.startswith("http://127.0.0.1:")
     assert settings.llm_warmup_on_start is False
 
@@ -104,3 +107,30 @@ def test_load_settings_corrects_whisper_style_path_mismatch(monkeypatch):
     settings = load_settings()
     assert settings.whisper_api_style == "openai"
     assert settings.whisper_asr_path == "/v1/audio/transcriptions"
+
+
+def test_load_settings_whisper_fallback_values(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("WHISPER_FALLBACK_BASE_URL", "http://fallback:9000")
+    monkeypatch.setenv("WHISPER_FALLBACK_API_STYLE", "asr")
+    monkeypatch.setenv("WHISPER_FALLBACK_ASR_PATH", "/asr")
+    settings = load_settings()
+    assert settings.whisper_fallback_enabled is True
+    assert settings.whisper_fallback_base_url == "http://fallback:9000"
+    assert settings.whisper_fallback_api_style == "asr"
+    assert settings.whisper_fallback_asr_path == "/asr"
+
+
+def test_config_doctor_detects_same_primary_and_fallback(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("WHISPER_BASE_URL", "http://same:9000")
+    monkeypatch.setenv("WHISPER_API_STYLE", "asr")
+    monkeypatch.setenv("WHISPER_ASR_PATH", "/asr")
+    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("WHISPER_FALLBACK_BASE_URL", "http://same:9000")
+    monkeypatch.setenv("WHISPER_FALLBACK_API_STYLE", "asr")
+    monkeypatch.setenv("WHISPER_FALLBACK_ASR_PATH", "/asr")
+    settings = load_settings()
+    issues = config_doctor_issues(settings)
+    assert any("fallback target matches primary" in issue.lower() for issue in issues)

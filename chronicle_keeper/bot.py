@@ -15,7 +15,7 @@ from discord.ext import commands
 from discord.sinks.errors import RecordingException
 import discord.gateway as discord_gateway
 
-from .config import Settings, load_settings
+from .config import Settings, config_doctor_issues, load_settings
 from .llm_client import LLMClient
 from .processor import SessionProcessor
 from .storage import GuildSettingsStore
@@ -875,6 +875,13 @@ def build_bot(settings: Settings) -> commands.Bot:
     @bot.event
     async def on_ready() -> None:
         logger.info("Logged in as %s (id=%s)", bot.user, bot.user.id)
+        issues = config_doctor_issues(settings)
+        if issues:
+            logger.warning("[config-doctor] detected %s potential issue(s):", len(issues))
+            for issue in issues:
+                logger.warning("[config-doctor] %s", issue)
+        else:
+            logger.info("[config-doctor] no obvious config issues detected")
         runtime_state = load_runtime_state()
         active_count = len(runtime_state.get("active_sessions", {}))
         if active_count > 0:

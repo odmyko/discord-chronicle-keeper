@@ -22,6 +22,11 @@ def _make_settings(port: int, api_style: str = "asr", asr_path: str = "/asr") ->
         whisper_task="transcribe",
         whisper_encode=True,
         whisper_warmup_on_start=False,
+        whisper_fallback_enabled=False,
+        whisper_fallback_base_url="",
+        whisper_fallback_api_style=api_style,
+        whisper_fallback_asr_path=asr_path,
+        whisper_fallback_openai_model="openai/whisper-large-v3-turbo",
         llm_base_url=f"http://127.0.0.1:{port}/v1",
         llm_model="stub-model",
         llm_temperature=0.0,
@@ -119,6 +124,32 @@ def test_whisper_openai_transcriptions_mode(tmp_path: Path) -> None:
             detailed = await client.transcribe_file_detailed(audio)
             assert detailed.text == "hello world"
             assert len(detailed.segments) == 2
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(_run())
+
+
+def test_whisper_fallback_when_primary_unreachable(tmp_path: Path) -> None:
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+
+    async def _run() -> None:
+        async def asr_handler(request: web.Request) -> web.Response:
+            return web.json_response({"text": "fallback ok"})
+
+        app = web.Application()
+        app.router.add_post("/asr", asr_handler)
+        runner, port = await _run_server(app)
+        try:
+            settings = _make_settings(65500, api_style="asr", asr_path="/asr")
+            settings.whisper_fallback_enabled = True
+            settings.whisper_fallback_base_url = f"http://127.0.0.1:{port}"
+            settings.whisper_fallback_api_style = "asr"
+            settings.whisper_fallback_asr_path = "/asr"
+            client = WhisperClient(settings)
+            text = await client.transcribe_file(audio)
+            assert text == "fallback ok"
         finally:
             await runner.cleanup()
 
