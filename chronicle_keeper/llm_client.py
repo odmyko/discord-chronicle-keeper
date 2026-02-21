@@ -33,7 +33,7 @@ class LLMClient:
             "- You may add light dramatic phrasing, but preserve factual accuracy.\n"
         )
 
-    async def _chat(self, system_prompt: str, user_prompt: str) -> str:
+    async def _chat(self, system_prompt: str, user_prompt: str, timeout_seconds: int = 600) -> str:
         endpoint = f"{self._base_url}/chat/completions"
         payload = {
             "model": self._model,
@@ -46,7 +46,7 @@ class LLMClient:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload, timeout=600) as resp:
+            async with session.post(endpoint, json=payload, timeout=timeout_seconds) as resp:
                 body = await resp.json(content_type=None)
                 if resp.status >= 400:
                     raise RuntimeError(f"LLM error {resp.status}: {body}")
@@ -182,6 +182,7 @@ class LLMClient:
             _ = await self._chat(
                 "You are a health-check assistant. Reply with exactly: OK",
                 "OK",
+                timeout_seconds=20,
             )
             return True, "ok"
         except Exception as exc:

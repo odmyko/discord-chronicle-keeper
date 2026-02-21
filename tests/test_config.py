@@ -25,7 +25,7 @@ def test_load_settings_defaults(monkeypatch):
     monkeypatch.delenv("MODEL_RUNNER_MODEL", raising=False)
     monkeypatch.delenv("LLM_TEMPERATURE", raising=False)
     monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
-    monkeypatch.delenv("LLM_WARMUP_ON_START", raising=False)
+    monkeypatch.setenv("LLM_WARMUP_ON_START", "false")
     monkeypatch.setenv("WHISPER_API_STYLE", "asr")
     monkeypatch.setenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo")
     monkeypatch.setenv("WHISPER_OPENAI_TEMPERATURE", "0.0")
@@ -95,3 +95,12 @@ def test_load_settings_whisper_openai_style(monkeypatch):
     assert settings.whisper_openai_temperature == 0.0
     assert settings.whisper_openai_prompt == "names: Mykola, Aria"
     assert settings.whisper_warmup_on_start is True
+
+
+def test_load_settings_corrects_whisper_style_path_mismatch(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("WHISPER_API_STYLE", "openai")
+    monkeypatch.setenv("WHISPER_ASR_PATH", "/asr")
+    settings = load_settings()
+    assert settings.whisper_api_style == "openai"
+    assert settings.whisper_asr_path == "/v1/audio/transcriptions"

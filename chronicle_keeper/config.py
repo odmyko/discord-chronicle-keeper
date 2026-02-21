@@ -71,11 +71,26 @@ def load_settings() -> Settings:
     if audio_mp3_vbr_quality > 9:
         audio_mp3_vbr_quality = 9
 
+    whisper_api_style = os.getenv("WHISPER_API_STYLE", "asr").strip().lower()
+    if whisper_api_style not in {"asr", "openai"}:
+        whisper_api_style = "asr"
+
+    whisper_asr_path = os.getenv("WHISPER_ASR_PATH", "").strip()
+    if whisper_asr_path and not whisper_asr_path.startswith("/"):
+        whisper_asr_path = f"/{whisper_asr_path}"
+    if not whisper_asr_path:
+        whisper_asr_path = "/v1/audio/transcriptions" if whisper_api_style == "openai" else "/asr"
+    # Guard against common misconfiguration: API style and path mismatch.
+    if whisper_api_style == "openai" and whisper_asr_path == "/asr":
+        whisper_asr_path = "/v1/audio/transcriptions"
+    if whisper_api_style == "asr" and whisper_asr_path == "/v1/audio/transcriptions":
+        whisper_asr_path = "/asr"
+
     return Settings(
         discord_bot_token=token,
         whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip("/"),
-        whisper_api_style=os.getenv("WHISPER_API_STYLE", "asr").strip().lower(),
-        whisper_asr_path=os.getenv("WHISPER_ASR_PATH", "/asr"),
+        whisper_api_style=whisper_api_style,
+        whisper_asr_path=whisper_asr_path,
         whisper_openai_model=os.getenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo").strip(),
         whisper_openai_temperature=float(os.getenv("WHISPER_OPENAI_TEMPERATURE", "0.0")),
         whisper_openai_prompt=os.getenv("WHISPER_OPENAI_PROMPT", "").strip(),
