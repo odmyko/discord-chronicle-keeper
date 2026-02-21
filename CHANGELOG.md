@@ -6,6 +6,24 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-02-21
+
+### Added
+- Startup config doctor checks with warnings for common ASR misconfiguration.
+- Whisper fallback quality gate controls:
+  - `WHISPER_FALLBACK_ON_LOW_QUALITY`
+  - `WHISPER_LOW_QUALITY_MIN_CHARS`
+  - `WHISPER_LOW_QUALITY_MIN_SEGMENTS`
+- New utility scripts:
+  - `scripts/smoke_e2e.py` for quick end-to-end ASR+LLM health checks
+  - `scripts/switch_asr_backend.py` to switch `.env` between `asr` and `vllm` backends.
+
+### Changed
+- Whisper fallback now supports two triggers:
+  - hard request failures
+  - weak primary transcript quality (heuristic scoring and replacement with better fallback result).
+- README and `.env.example` updated with fallback quality-gate and backend switch workflow.
+
 ## [0.7.0] - 2026-02-21
 
 ### Added
