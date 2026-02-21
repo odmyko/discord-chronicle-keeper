@@ -27,6 +27,9 @@ def _make_settings(port: int, api_style: str = "asr", asr_path: str = "/asr") ->
         whisper_fallback_api_style=api_style,
         whisper_fallback_asr_path=asr_path,
         whisper_fallback_openai_model="openai/whisper-large-v3-turbo",
+        whisper_fallback_on_low_quality=False,
+        whisper_low_quality_min_chars=40,
+        whisper_low_quality_min_segments=1,
         llm_base_url=f"http://127.0.0.1:{port}/v1",
         llm_model="stub-model",
         llm_temperature=0.0,
@@ -152,6 +155,43 @@ def test_whisper_fallback_when_primary_unreachable(tmp_path: Path) -> None:
             assert text == "fallback ok"
         finally:
             await runner.cleanup()
+
+    asyncio.run(_run())
+
+
+def test_whisper_fallback_on_low_quality_result(tmp_path: Path) -> None:
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+
+    async def _run() -> None:
+        async def primary_handler(request: web.Request) -> web.Response:
+            return web.json_response({"text": "ok", "segments": [{"start": 0.0, "end": 0.2, "text": "ok"}]})
+
+        async def fallback_handler(request: web.Request) -> web.Response:
+            return web.json_response({"text": "this fallback transcript is clearly richer", "segments": [{"start": 0.0, "end": 1.0, "text": "fallback richer"}]})
+
+        app_primary = web.Application()
+        app_primary.router.add_post("/asr", primary_handler)
+        app_fallback = web.Application()
+        app_fallback.router.add_post("/asr", fallback_handler)
+
+        runner_primary, port_primary = await _run_server(app_primary)
+        runner_fallback, port_fallback = await _run_server(app_fallback)
+        try:
+            settings = _make_settings(port_primary, api_style="asr", asr_path="/asr")
+            settings.whisper_fallback_enabled = True
+            settings.whisper_fallback_base_url = f"http://127.0.0.1:{port_fallback}"
+            settings.whisper_fallback_api_style = "asr"
+            settings.whisper_fallback_asr_path = "/asr"
+            settings.whisper_fallback_on_low_quality = True
+            settings.whisper_low_quality_min_chars = 10
+            settings.whisper_low_quality_min_segments = 1
+            client = WhisperClient(settings)
+            text = await client.transcribe_file(audio)
+            assert "fallback richer" in text
+        finally:
+            await runner_primary.cleanup()
+            await runner_fallback.cleanup()
 
     asyncio.run(_run())
 

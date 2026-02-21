@@ -118,6 +118,11 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
   - `WHISPER_FALLBACK_BASE_URL=http://whisper:9000` (or another ASR endpoint)
   - optional overrides: `WHISPER_FALLBACK_API_STYLE`, `WHISPER_FALLBACK_ASR_PATH`, `WHISPER_FALLBACK_OPENAI_MODEL`
   - if primary ASR request fails, bot retries once via fallback target.
+- Optional weak-result failover (quality gate):
+  - `WHISPER_FALLBACK_ON_LOW_QUALITY=true`
+  - `WHISPER_LOW_QUALITY_MIN_CHARS=40`
+  - `WHISPER_LOW_QUALITY_MIN_SEGMENTS=1`
+  - if primary transcript is too short/sparse, bot retries via fallback and keeps the better result.
 - `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
@@ -200,6 +205,13 @@ Start stack with vLLM Whisper backend (OpenAI transcription API):
 ```bash
 docker compose --profile vllm up -d --build
 docker compose logs -f whisper_vllm
+```
+
+Helper to switch backend and optionally restart compose:
+
+```bash
+python scripts/switch_asr_backend.py --backend asr --up
+python scripts/switch_asr_backend.py --backend vllm --up
 ```
 
 Stop:
@@ -312,6 +324,20 @@ Or target a specific file:
 
 ```bash
 python scripts/benchmark_whisper.py --audio data/sessions/<guild>/<session>/audio/mixed_session.mp3 --runs 3
+```
+
+### Smoke E2E (ASR + LLM)
+
+Run a quick end-to-end health check using latest recorded audio:
+
+```bash
+python scripts/smoke_e2e.py
+```
+
+Or target a specific file:
+
+```bash
+python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_session.mp3
 ```
 
 ## Slash Commands

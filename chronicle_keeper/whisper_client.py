@@ -47,6 +47,9 @@ class WhisperClient:
             openai_model=settings.whisper_openai_model,
         )
         self._fallback_enabled = settings.whisper_fallback_enabled
+        self._fallback_on_low_quality = settings.whisper_fallback_on_low_quality
+        self._low_quality_min_chars = settings.whisper_low_quality_min_chars
+        self._low_quality_min_segments = settings.whisper_low_quality_min_segments
         self._fallback = _ASRProfile(
             name="fallback",
             base_url=settings.whisper_fallback_base_url,
@@ -67,7 +70,30 @@ class WhisperClient:
 
     async def transcribe_file_detailed(self, audio_path: Path) -> TranscriptResult:
         try:
-            return await self._transcribe_with_profile(audio_path, language=self._language, profile=self._primary)
+            primary = await self._transcribe_with_profile(audio_path, language=self._language, profile=self._primary)
+            if (
+                self._fallback_enabled
+                and self._fallback_on_low_quality
+                and self._fallback.base_url
+                and self._is_low_quality(primary)
+            ):
+                logger.warning(
+                    "[whisper] low_quality_detected profile=%s chars=%s segments=%s threshold_chars=%s threshold_segments=%s",
+                    self._primary.name,
+                    len(primary.text.strip()),
+                    len(primary.segments),
+                    self._low_quality_min_chars,
+                    self._low_quality_min_segments,
+                )
+                fallback = await self._transcribe_with_profile(
+                    audio_path,
+                    language=self._language,
+                    profile=self._fallback,
+                )
+                if self._score(fallback) >= self._score(primary):
+                    logger.info("[whisper] selected_fallback_result primary_score=%s fallback_score=%s", self._score(primary), self._score(fallback))
+                    return fallback
+            return primary
         except Exception as primary_exc:
             if self._fallback_enabled and self._fallback.base_url:
                 logger.warning(
@@ -79,6 +105,18 @@ class WhisperClient:
                 )
                 return await self._transcribe_with_profile(audio_path, language=self._language, profile=self._fallback)
             raise
+
+    def _score(self, result: TranscriptResult) -> int:
+        return len((result.text or "").strip()) + (len(result.segments) * 24)
+
+    def _is_low_quality(self, result: TranscriptResult) -> bool:
+        text_chars = len((result.text or "").strip())
+        segments = len(result.segments)
+        if self._low_quality_min_chars > 0 and text_chars < self._low_quality_min_chars:
+            return True
+        if self._low_quality_min_segments > 0 and segments < self._low_quality_min_segments:
+            return True
+        return False
 
     async def _transcribe_with_profile(
         self,

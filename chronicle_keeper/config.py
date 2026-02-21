@@ -25,6 +25,9 @@ class Settings:
     whisper_fallback_api_style: str
     whisper_fallback_asr_path: str
     whisper_fallback_openai_model: str
+    whisper_fallback_on_low_quality: bool
+    whisper_low_quality_min_chars: int
+    whisper_low_quality_min_segments: int
     llm_base_url: str
     llm_model: str
     llm_temperature: float
@@ -106,6 +109,10 @@ def load_settings() -> Settings:
         os.getenv("WHISPER_FALLBACK_ENABLED", "true" if whisper_fallback_enabled_default else "false"),
         default=whisper_fallback_enabled_default,
     )
+    whisper_fallback_on_low_quality = _as_bool(
+        os.getenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "false"),
+        default=False,
+    )
 
     return Settings(
         discord_bot_token=token,
@@ -127,6 +134,9 @@ def load_settings() -> Settings:
             os.getenv("WHISPER_FALLBACK_OPENAI_MODEL", "").strip()
             or os.getenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo").strip()
         ),
+        whisper_fallback_on_low_quality=whisper_fallback_on_low_quality,
+        whisper_low_quality_min_chars=max(0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_CHARS", "40"))),
+        whisper_low_quality_min_segments=max(0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "1"))),
         llm_base_url=resolved_llm_base_url.rstrip("/"),
         llm_model=resolved_llm_model,
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
@@ -164,6 +174,8 @@ def config_doctor_issues(settings: Settings) -> list[str]:
         )
     if settings.whisper_fallback_enabled and not settings.whisper_fallback_base_url:
         issues.append("WHISPER_FALLBACK_ENABLED=true but WHISPER_FALLBACK_BASE_URL is empty.")
+    if settings.whisper_fallback_on_low_quality and not settings.whisper_fallback_enabled:
+        issues.append("WHISPER_FALLBACK_ON_LOW_QUALITY=true but WHISPER_FALLBACK_ENABLED=false.")
     if settings.whisper_fallback_enabled:
         same_target = (
             settings.whisper_base_url.rstrip("/") == settings.whisper_fallback_base_url.rstrip("/")

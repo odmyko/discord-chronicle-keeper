@@ -62,6 +62,9 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.whisper_fallback_enabled is False
     assert settings.whisper_fallback_base_url == ""
     assert settings.whisper_fallback_asr_path == "/asr"
+    assert settings.whisper_fallback_on_low_quality is False
+    assert settings.whisper_low_quality_min_chars == 40
+    assert settings.whisper_low_quality_min_segments == 1
     assert settings.llm_base_url.startswith("http://127.0.0.1:")
     assert settings.llm_warmup_on_start is False
 
@@ -115,11 +118,17 @@ def test_load_settings_whisper_fallback_values(monkeypatch):
     monkeypatch.setenv("WHISPER_FALLBACK_BASE_URL", "http://fallback:9000")
     monkeypatch.setenv("WHISPER_FALLBACK_API_STYLE", "asr")
     monkeypatch.setenv("WHISPER_FALLBACK_ASR_PATH", "/asr")
+    monkeypatch.setenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "true")
+    monkeypatch.setenv("WHISPER_LOW_QUALITY_MIN_CHARS", "30")
+    monkeypatch.setenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "2")
     settings = load_settings()
     assert settings.whisper_fallback_enabled is True
     assert settings.whisper_fallback_base_url == "http://fallback:9000"
     assert settings.whisper_fallback_api_style == "asr"
     assert settings.whisper_fallback_asr_path == "/asr"
+    assert settings.whisper_fallback_on_low_quality is True
+    assert settings.whisper_low_quality_min_chars == 30
+    assert settings.whisper_low_quality_min_segments == 2
 
 
 def test_config_doctor_detects_same_primary_and_fallback(monkeypatch):
@@ -134,3 +143,12 @@ def test_config_doctor_detects_same_primary_and_fallback(monkeypatch):
     settings = load_settings()
     issues = config_doctor_issues(settings)
     assert any("fallback target matches primary" in issue.lower() for issue in issues)
+
+
+def test_config_doctor_detects_low_quality_without_fallback(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "false")
+    monkeypatch.setenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "true")
+    settings = load_settings()
+    issues = config_doctor_issues(settings)
+    assert any("fallback_on_low_quality" in issue.lower() for issue in issues)
