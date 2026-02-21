@@ -6,6 +6,27 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-21
+
+### Added
+- OpenAI-style Whisper transcription support improvements:
+  - configurable OpenAI transcription knobs (`WHISPER_OPENAI_TEMPERATURE`, `WHISPER_OPENAI_PROMPT`)
+  - startup ASR warmup (`WHISPER_WARMUP_ON_START`)
+- LLM startup warmup option (`LLM_WARMUP_ON_START`) to reduce first summary latency.
+- Optional vLLM Whisper audio service image recipe:
+  - `docker/vllm-whisper-audio/Dockerfile` with audio extras for `/v1/audio/transcriptions`.
+
+### Changed
+- Startup lifecycle now performs optional warmup calls for Whisper and LLM with structured logs.
+- Docker Compose docs and examples updated for vLLM OpenAI transcription routing.
+- Benchmark docs expanded for both `/asr` and OpenAI transcription endpoints.
+
+### Fixed
+- Guarded Whisper API style/path mismatch in config:
+  - auto-corrects conflicting `WHISPER_API_STYLE` + `WHISPER_ASR_PATH` combinations
+  - prevents common misconfiguration where OpenAI payload is sent to `/asr`.
+- LLM warmup now uses a short timeout (fail-fast) to avoid blocking bot readiness.
+
 ## [0.6.1] - 2026-02-20
 
 ### Added
