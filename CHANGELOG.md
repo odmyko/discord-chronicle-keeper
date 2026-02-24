@@ -6,6 +6,19 @@ The format is based on Keep a Changelog and this project aims to follow Semantic
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-02-24
+
+### Added
+- Campaign/session dropdown autocomplete in slash commands:
+  - campaign picker for `/chronicle_campaign_use`, `/chronicle_session_move`, `/chronicle_campaign_summarize`, `/chronicle_campaign_sum_range`
+  - session picker for `/chronicle_reprocess`, `/chronicle_session_move`, `/chronicle_purge_session`
+- New filtered campaign summary command:
+  - `/chronicle_campaign_sum_range` with `from_date`, `to_date`, and `limit`
+
+### Changed
+- `/chronicle_campaign_summarize` now defaults to full-campaign scope (all sessions).
+- README now includes a dedicated `Campaign Workflow (Recommended)` section.
+
 ## [0.11.0] - 2026-02-21
 
 ### Added
