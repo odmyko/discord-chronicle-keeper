@@ -100,9 +100,19 @@ class SessionProcessor:
         guild: discord.Guild,
         sink: discord.sinks.Sink,
         summary_language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+        campaign_id: str = "",
+        campaign_name: str = "",
     ) -> SessionArtifacts:
         return await self.process_sinks(
-            guild, [sink], summary_language=summary_language
+            guild,
+            [sink],
+            summary_language=summary_language,
+            session_context=session_context,
+            name_hints=name_hints,
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
         )
 
     async def process_sinks(
@@ -110,6 +120,10 @@ class SessionProcessor:
         guild: discord.Guild,
         sinks: list[discord.sinks.Sink],
         summary_language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+        campaign_id: str = "",
+        campaign_name: str = "",
     ) -> SessionArtifacts:
         process_started = time.perf_counter()
         valid_sinks = [s for s in sinks if getattr(s, "audio_data", None)]
@@ -136,6 +150,11 @@ class SessionProcessor:
         checkpoint = {
             "guild_id": guild.id,
             "started_at_utc": now,
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "summary_language_used": summary_language,
+            "session_context_used": session_context,
+            "name_hints_used": name_hints,
             "status": "transcribing",
             "segments_total": len(valid_sinks),
             "total_tracks": sum(len(s.audio_data) for s in valid_sinks),
@@ -309,7 +328,10 @@ class SessionProcessor:
             llm_started = time.perf_counter()
             try:
                 summary_markdown = await self._llm.generate_summary(
-                    full_transcript, language=summary_language
+                    full_transcript,
+                    language=summary_language,
+                    session_context=session_context,
+                    name_hints=name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -330,6 +352,8 @@ class SessionProcessor:
                             chunk_index=idx,
                             total_chunks=len(chunks),
                             language=summary_language,
+                            session_context=session_context,
+                            name_hints=name_hints,
                         )
                     except Exception:
                         self._observe_metric("llm_summarize", llm_started, False)
@@ -348,6 +372,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.combine_chunk_summaries(
                     combined,
                     language=summary_language,
+                    session_context=session_context,
+                    name_hints=name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -387,6 +413,10 @@ class SessionProcessor:
         self,
         session_dir: Path,
         summary_language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+        campaign_id: str = "",
+        campaign_name: str = "",
     ) -> SessionArtifacts:
         reprocess_started = time.perf_counter()
         audio_dir = session_dir / "audio"
@@ -504,7 +534,10 @@ class SessionProcessor:
             llm_started = time.perf_counter()
             try:
                 summary_markdown = await self._llm.generate_summary(
-                    full_transcript, language=summary_language
+                    full_transcript,
+                    language=summary_language,
+                    session_context=session_context,
+                    name_hints=name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -522,6 +555,8 @@ class SessionProcessor:
                         chunk_index=idx,
                         total_chunks=len(chunks),
                         language=summary_language,
+                        session_context=session_context,
+                        name_hints=name_hints,
                     )
                 except Exception:
                     self._observe_metric("llm_summarize", llm_started, False)
@@ -538,6 +573,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.combine_chunk_summaries(
                     combined,
                     language=summary_language,
+                    session_context=session_context,
+                    name_hints=name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)

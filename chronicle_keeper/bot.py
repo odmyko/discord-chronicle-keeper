@@ -9,7 +9,7 @@ import re
 import shutil
 import struct
 import time
-from typing import Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 import discord
 from discord.ext import commands
@@ -71,6 +71,11 @@ class GuildRecordingState:
     decode_burst_skipped_cooldown: int = 0
     last_decode_burst_at_utc: str | None = None
     decode_recovery_cooldown_until: float = 0.0
+    campaign_id: str = ""
+    campaign_name: str = ""
+    summary_language: str = "ru"
+    session_context: str = ""
+    name_hints: str = ""
     done_callback: DoneCallback | None = None
     fallback_channel: discord.abc.Messageable | None = None
 
@@ -532,6 +537,110 @@ def build_bot(settings: Settings) -> commands.Bot:
             return None
         candidates.sort(key=lambda p: p.name, reverse=True)
         return candidates[0]
+
+    def list_session_dirs_for_guild(guild_id: int, limit: int = 20) -> list[Path]:
+        guild_sessions_dir = settings.data_dir / "sessions" / str(guild_id)
+        if not guild_sessions_dir.exists() or not guild_sessions_dir.is_dir():
+            return []
+        candidates = [
+            p
+            for p in guild_sessions_dir.iterdir()
+            if p.is_dir() and session_timestamp_utc(p.name) is not None
+        ]
+        candidates.sort(key=lambda p: p.name, reverse=True)
+        return candidates[: max(1, limit)]
+
+    def read_session_snapshot(session_dir: Path) -> dict[str, str]:
+        checkpoint = load_json_file(str(session_dir / "processing_state.json")) or {}
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        return {
+            "campaign_id": str(checkpoint.get("campaign_id") or "").strip(),
+            "campaign_name": str(checkpoint.get("campaign_name") or "").strip(),
+            "summary_language": str(checkpoint.get("summary_language_used") or "ru")
+            .strip()
+            .lower()
+            or "ru",
+            "session_context": str(
+                checkpoint.get("session_context_used") or ""
+            ).strip(),
+            "name_hints": str(checkpoint.get("name_hints_used") or "").strip(),
+        }
+
+    def list_session_dirs_for_campaign(
+        guild_id: int,
+        campaign_id: str,
+        *,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 200,
+    ) -> list[Path]:
+        session_dirs = list_session_dirs_for_guild(guild_id, limit=5000)
+        selected: list[Path] = []
+        for session_dir in session_dirs:
+            ts = session_timestamp_utc(session_dir.name)
+            if ts is None:
+                continue
+            if from_date and ts.date() < from_date.date():
+                continue
+            if to_date and ts.date() > to_date.date():
+                continue
+            snapshot = read_session_snapshot(session_dir)
+            if snapshot.get("campaign_id") != campaign_id:
+                continue
+            selected.append(session_dir)
+            if len(selected) >= max(1, limit):
+                break
+        return selected
+
+    def parse_yyyy_mm_dd(value: str) -> datetime | None:
+        try:
+            return datetime.strptime(value.strip(), "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+
+    async def campaign_autocomplete(
+        ctx: discord.AutocompleteContext,
+    ) -> list[discord.OptionChoice]:
+        interaction = getattr(ctx, "interaction", None)
+        guild = getattr(interaction, "guild", None)
+        if guild is None:
+            return []
+        query = str(getattr(ctx, "value", "") or "").strip().lower()
+        choices: list[discord.OptionChoice] = []
+        for campaign in store.list_campaigns(guild.id):
+            campaign_id = str(campaign.get("id") or "").strip()
+            campaign_name = str(campaign.get("name") or "").strip()
+            if not campaign_id:
+                continue
+            if query and query not in campaign_id.lower() and query not in campaign_name.lower():
+                continue
+            label = f"{campaign_name} ({campaign_id})" if campaign_name else campaign_id
+            choices.append(discord.OptionChoice(name=label[:100], value=campaign_id))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    async def session_autocomplete(
+        ctx: discord.AutocompleteContext,
+    ) -> list[discord.OptionChoice]:
+        interaction = getattr(ctx, "interaction", None)
+        guild = getattr(interaction, "guild", None)
+        if guild is None:
+            return []
+        query = str(getattr(ctx, "value", "") or "").strip().lower()
+        choices: list[discord.OptionChoice] = []
+        for session_dir in list_session_dirs_for_guild(guild.id, limit=50):
+            session_id = session_dir.name
+            snapshot = read_session_snapshot(session_dir)
+            campaign_name = str(snapshot.get("campaign_name") or "").strip()
+            if query and query not in session_id.lower() and query not in campaign_name.lower():
+                continue
+            label = f"{session_id} | {campaign_name}" if campaign_name else session_id
+            choices.append(discord.OptionChoice(name=label[:100], value=session_id))
+            if len(choices) >= 25:
+                break
+        return choices
 
     def cleanup_old_sessions(retention_days: int) -> tuple[int, int]:
         sessions_root = settings.data_dir / "sessions"
@@ -1262,6 +1371,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         session_id: str = discord.Option(
             str,
             description="Session folder id, e.g. 20260219_201349",
+            autocomplete=session_autocomplete,
             required=True,
         ),
     ) -> None:
@@ -1451,14 +1561,14 @@ def build_bot(settings: Settings) -> commands.Bot:
         )
 
     @bot.slash_command(
-        name="chronicle_setup_language",
-        description="Set language for generated session summary",
+        name="chronicle_defaults_language",
+        description="Set guild default summary language (campaign fallback)",
     )
-    async def chronicle_setup_language(
+    async def chronicle_defaults_language(
         ctx: discord.ApplicationContext,
         language: str = discord.Option(
             str,
-            description="Summary language",
+            description="Default summary language",
             choices=["en", "uk", "ru"],
             required=True,
         ),
@@ -1468,8 +1578,295 @@ def build_bot(settings: Settings) -> commands.Bot:
                 "This command can be used only in a server.", ephemeral=True
             )
             return
-        store.set_summary_language(ctx.guild.id, language)
-        await ctx.respond(f"Summary language set to `{language}`.", ephemeral=True)
+        store.set_default_summary_language(ctx.guild.id, language)
+        await ctx.respond(
+            f"Guild default summary language set to `{language}`.", ephemeral=True
+        )
+
+    @bot.slash_command(
+        name="chronicle_defaults_context",
+        description="Set guild default DM context text (campaign fallback)",
+    )
+    async def chronicle_defaults_context(
+        ctx: discord.ApplicationContext,
+        context: str = discord.Option(
+            str,
+            description="Default session intro/background context",
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        store.set_default_session_context(ctx.guild.id, context)
+        await ctx.respond(
+            f"Guild default context saved (`{len(context.strip())}` chars).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_defaults_names",
+        description="Set guild default names/roles hints (campaign fallback)",
+    )
+    async def chronicle_defaults_names(
+        ctx: discord.ApplicationContext,
+        hints: str = discord.Option(
+            str,
+            description="Default canonical names and roles",
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        store.set_default_name_hints(ctx.guild.id, hints)
+        await ctx.respond(
+            f"Guild default name hints saved (`{len(hints.strip())}` chars).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_create",
+        description="Create a campaign and optionally set initial language",
+    )
+    async def chronicle_campaign_create(
+        ctx: discord.ApplicationContext,
+        name: str = discord.Option(str, description="Campaign name", required=True),
+        language: str = discord.Option(
+            str,
+            description="Optional campaign summary language override",
+            choices=["en", "uk", "ru"],
+            required=False,
+            default="",
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        try:
+            campaign = store.create_campaign(
+                ctx.guild.id, name=name, summary_language=language
+            )
+        except ValueError as exc:
+            await ctx.respond(str(exc), ephemeral=True)
+            return
+        await ctx.respond(
+            f"Campaign created: `{campaign['name']}` (`{campaign['id']}`).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_list",
+        description="List campaigns for this guild",
+    )
+    async def chronicle_campaign_list(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        campaigns = store.list_campaigns(ctx.guild.id)
+        active_id = store.get_active_campaign_id(ctx.guild.id)
+        if not campaigns:
+            await ctx.respond(
+                "No campaigns found. Use `/chronicle_campaign_create` first.",
+                ephemeral=True,
+            )
+            return
+        lines = ["## Campaigns"]
+        for c in campaigns:
+            marker = " (active)" if c.get("id") == active_id else ""
+            lines.append(f"- `{c.get('id')}`: **{c.get('name')}**{marker}")
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @bot.slash_command(
+        name="chronicle_campaign_use",
+        description="Set active campaign for next recordings",
+    )
+    async def chronicle_campaign_use(
+        ctx: discord.ApplicationContext,
+        campaign: str = discord.Option(
+            str,
+            description="Campaign id or exact name",
+            autocomplete=campaign_autocomplete,
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        resolved = store.find_campaign(ctx.guild.id, campaign)
+        if not resolved:
+            await ctx.respond(
+                f"Campaign not found: `{campaign}`",
+                ephemeral=True,
+            )
+            return
+        try:
+            store.set_active_campaign(ctx.guild.id, str(resolved["id"]))
+        except ValueError as exc:
+            await ctx.respond(str(exc), ephemeral=True)
+            return
+        await ctx.respond(
+            f"Active campaign set to `{resolved['name']}` (`{resolved['id']}`).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_show",
+        description="Show active campaign effective settings",
+    )
+    async def chronicle_campaign_show(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        resolved = store.resolve_active_campaign_settings(ctx.guild.id)
+        campaign_id = resolved.get("campaign_id", "")
+        if not campaign_id:
+            await ctx.respond(
+                "No active campaign selected. Use `/chronicle_campaign_create` and `/chronicle_campaign_use`.",
+                ephemeral=True,
+            )
+            return
+        lines = ["## Active Campaign"]
+        lines.append(
+            f"- Campaign: `{resolved.get('campaign_name', '')}` (`{campaign_id}`)"
+        )
+        lines.append(
+            f"- Effective language: `{resolved.get('summary_language', 'ru')}`"
+        )
+        lines.append(
+            f"- Effective session context: `{'set' if resolved.get('session_context') else 'not set'}` ({len(resolved.get('session_context', ''))} chars)"
+        )
+        lines.append(
+            f"- Effective name hints: `{'set' if resolved.get('name_hints') else 'not set'}` ({len(resolved.get('name_hints', ''))} chars)"
+        )
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @bot.slash_command(
+        name="chronicle_campaign_context",
+        description="Update active campaign context text",
+    )
+    async def chronicle_campaign_update_context(
+        ctx: discord.ApplicationContext,
+        context: str = discord.Option(
+            str,
+            description="Campaign session intro/background context",
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        if not campaign_id:
+            await ctx.respond(
+                "No active campaign selected.",
+                ephemeral=True,
+            )
+            return
+        store.update_campaign(ctx.guild.id, campaign_id, session_context=context)
+        await ctx.respond(
+            f"Campaign context updated (`{len(context.strip())}` chars).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_names",
+        description="Update active campaign names/roles hints",
+    )
+    async def chronicle_campaign_update_names(
+        ctx: discord.ApplicationContext,
+        hints: str = discord.Option(
+            str,
+            description="Canonical names and roles",
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        if not campaign_id:
+            await ctx.respond(
+                "No active campaign selected.",
+                ephemeral=True,
+            )
+            return
+        store.update_campaign(ctx.guild.id, campaign_id, name_hints=hints)
+        await ctx.respond(
+            f"Campaign name hints updated (`{len(hints.strip())}` chars).",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_language",
+        description="Update active campaign summary language override",
+    )
+    async def chronicle_campaign_update_language(
+        ctx: discord.ApplicationContext,
+        language: str = discord.Option(
+            str,
+            description="Campaign summary language override",
+            choices=["en", "uk", "ru"],
+            required=True,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        if not campaign_id:
+            await ctx.respond(
+                "No active campaign selected.",
+                ephemeral=True,
+            )
+            return
+        store.update_campaign(ctx.guild.id, campaign_id, summary_language=language)
+        await ctx.respond(
+            f"Campaign language override set to `{language}`.", ephemeral=True
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_lang_clear",
+        description="Clear active campaign language override (use guild default)",
+    )
+    async def chronicle_campaign_language_clear(
+        ctx: discord.ApplicationContext,
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        if not campaign_id:
+            await ctx.respond(
+                "No active campaign selected.",
+                ephemeral=True,
+            )
+            return
+        store.update_campaign(ctx.guild.id, campaign_id, summary_language="")
+        await ctx.respond(
+            "Campaign language override cleared (will use guild default).",
+            ephemeral=True,
+        )
 
     @bot.slash_command(
         name="chronicle_status", description="Show recorder status and health counters"
@@ -1490,6 +1887,15 @@ def build_bot(settings: Settings) -> commands.Bot:
         configured_text = (
             ctx.guild.get_channel(configured_text_id) if configured_text_id else None
         )
+        active_campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        active_campaign = (
+            store.get_campaign(ctx.guild.id, active_campaign_id)
+            if active_campaign_id
+            else None
+        )
+        guild_default_language = store.get_default_summary_language(
+            ctx.guild.id, default="ru"
+        )
         voice_client = ctx.guild.voice_client
         lines = ["## Chronicle Status"]
         lines.append(f"- Recording active: `{state.sink is not None}`")
@@ -1501,6 +1907,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         lines.append(
             f"- Configured chronicle channel: `{getattr(configured_text, 'name', 'not set')}`"
         )
+        lines.append(
+            f"- Active campaign: `{active_campaign.get('name') if active_campaign else 'not set'}` (`{active_campaign_id or ''}`)"
+        )
+        lines.append(f"- Guild default language: `{guild_default_language}`")
         if voice_client is not None:
             lines.append(
                 f"- Bot voice connection: `connected={voice_client.is_connected()} channel={getattr(voice_client.channel, 'name', 'none')}`"
@@ -1602,7 +2012,10 @@ def build_bot(settings: Settings) -> commands.Bot:
 
         state.processing = True
         started = time.perf_counter()
-        summary_language = store.get_summary_language(ctx.guild.id, default="ru")
+        snapshot = read_session_snapshot(session_dir)
+        summary_language = snapshot.get("summary_language", "ru")
+        session_context = snapshot.get("session_context", "")
+        name_hints = snapshot.get("name_hints", "")
         await try_send(
             target_channel,
             f"Reprocessing latest saved session: `{session_dir.name}` (language `{summary_language}`)...",
@@ -1612,6 +2025,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                 processor.reprocess_saved_session(
                     session_dir=session_dir,
                     summary_language=summary_language,
+                    session_context=session_context,
+                    name_hints=name_hints,
+                    campaign_id=snapshot.get("campaign_id", ""),
+                    campaign_name=snapshot.get("campaign_name", ""),
                 ),
                 timeout=settings.processing_timeout_seconds,
             )
@@ -1666,6 +2083,466 @@ def build_bot(settings: Settings) -> commands.Bot:
             await ctx.followup.send(f"Reprocess failed: `{exc}`", ephemeral=True)
         finally:
             state.processing = False
+
+    @bot.slash_command(
+        name="chronicle_sessions",
+        description="List recent sessions for this guild",
+    )
+    async def chronicle_sessions(
+        ctx: discord.ApplicationContext,
+        limit: int = discord.Option(
+            int,
+            description="How many recent sessions to list",
+            required=False,
+            default=10,
+            min_value=1,
+            max_value=50,
+        ),
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        session_dirs = list_session_dirs_for_guild(ctx.guild.id, limit=limit)
+        if not session_dirs:
+            await ctx.respond("No sessions found.", ephemeral=True)
+            return
+        lines = ["## Sessions"]
+        for session_dir in session_dirs:
+            snapshot = read_session_snapshot(session_dir)
+            campaign_name = snapshot.get("campaign_name") or "n/a"
+            lines.append(
+                f"- `{session_dir.name}` campaign=`{campaign_name}` language=`{snapshot.get('summary_language', 'ru')}`"
+            )
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @bot.slash_command(
+        name="chronicle_reprocess",
+        description="Reprocess a specific session by ID",
+    )
+    async def chronicle_reprocess(
+        ctx: discord.ApplicationContext,
+        session_id: str = discord.Option(
+            str,
+            description="Session folder id, e.g. 20260219_201349",
+            autocomplete=session_autocomplete,
+            required=True,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        await ctx.defer(ephemeral=True)
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.sink is not None:
+            await ctx.followup.send(
+                "Cannot reprocess while recording is active.", ephemeral=True
+            )
+            return
+        if state.processing:
+            await ctx.followup.send(
+                "Another processing task is already running.", ephemeral=True
+            )
+            return
+
+        session_dir = (
+            settings.data_dir / "sessions" / str(ctx.guild.id) / session_id.strip()
+        )
+        if not session_dir.exists() or not session_dir.is_dir():
+            await ctx.followup.send(
+                f"Session `{session_id}` not found.", ephemeral=True
+            )
+            return
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        snapshot = read_session_snapshot(session_dir)
+        state.processing = True
+        try:
+            await try_send(
+                target_channel,
+                f"Reprocessing session `{session_id}` (language `{snapshot.get('summary_language', 'ru')}`)...",
+            )
+            artifacts = await asyncio.wait_for(
+                processor.reprocess_saved_session(
+                    session_dir=session_dir,
+                    summary_language=snapshot.get("summary_language", "ru"),
+                    session_context=snapshot.get("session_context", ""),
+                    name_hints=snapshot.get("name_hints", ""),
+                    campaign_id=snapshot.get("campaign_id", ""),
+                    campaign_name=snapshot.get("campaign_name", ""),
+                ),
+                timeout=settings.processing_timeout_seconds,
+            )
+            await try_send(target_channel, f"Reprocess done: `{artifacts.session_dir}`")
+            await try_send_file(
+                target_channel,
+                str(artifacts.full_transcript_txt_path),
+                content="## Full Transcript (attached as .txt)",
+            )
+            await try_send(target_channel, "## AI Session Summary")
+            await send_long(target_channel, artifacts.summary_markdown)
+            await ctx.followup.send(
+                f"Reprocessed `{session_id}` successfully.", ephemeral=True
+            )
+        except TimeoutError:
+            await try_send(
+                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+            )
+            await ctx.followup.send("Reprocess timed out.", ephemeral=True)
+        except Exception as exc:
+            logger.exception(
+                "[reprocess] command_failed guild_id=%s session_dir=%s",
+                ctx.guild.id,
+                session_dir,
+            )
+            await try_send(target_channel, f"Reprocess failed: `{exc}`")
+            await ctx.followup.send(f"Reprocess failed: `{exc}`", ephemeral=True)
+        finally:
+            state.processing = False
+
+    @bot.slash_command(
+        name="chronicle_session_move",
+        description="Move a session to another campaign",
+    )
+    async def chronicle_session_move(
+        ctx: discord.ApplicationContext,
+        session_id: str = discord.Option(
+            str,
+            description="Session folder id, e.g. 20260219_201349",
+            autocomplete=session_autocomplete,
+            required=True,
+        ),
+        campaign: str = discord.Option(
+            str,
+            description="Target campaign id or exact name",
+            autocomplete=campaign_autocomplete,
+            required=True,
+        ),
+        reprocess: bool = discord.Option(
+            bool,
+            description="Reprocess summary after move",
+            required=False,
+            default=False,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        await ctx.defer(ephemeral=True)
+        session_dir = (
+            settings.data_dir / "sessions" / str(ctx.guild.id) / session_id.strip()
+        )
+        checkpoint_path = session_dir / "processing_state.json"
+        if not checkpoint_path.exists():
+            await ctx.followup.send(
+                f"Session `{session_id}` has no `processing_state.json`.",
+                ephemeral=True,
+            )
+            return
+        target_campaign = store.find_campaign(ctx.guild.id, campaign)
+        if not target_campaign:
+            await ctx.followup.send(
+                f"Campaign not found: `{campaign}`",
+                ephemeral=True,
+            )
+            return
+        snapshot = load_json_file(str(checkpoint_path)) or {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        snapshot["campaign_id"] = str(target_campaign.get("id") or "")
+        snapshot["campaign_name"] = str(target_campaign.get("name") or "")
+        snapshot["moved_at_utc"] = datetime.now(UTC).isoformat()
+        snapshot["moved_by_user_id"] = int(ctx.user.id)
+        save_json_file(str(checkpoint_path), snapshot)
+
+        if not reprocess:
+            await ctx.followup.send(
+                f"Session `{session_id}` moved to campaign `{target_campaign.get('name')}`.",
+                ephemeral=True,
+            )
+            return
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.processing or state.sink is not None:
+            await ctx.followup.send(
+                "Session moved, but reprocess skipped because recorder is busy.",
+                ephemeral=True,
+            )
+            return
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        state.processing = True
+        try:
+            session_snapshot = read_session_snapshot(session_dir)
+            artifacts = await asyncio.wait_for(
+                processor.reprocess_saved_session(
+                    session_dir=session_dir,
+                    summary_language=session_snapshot.get("summary_language", "ru"),
+                    session_context=session_snapshot.get("session_context", ""),
+                    name_hints=session_snapshot.get("name_hints", ""),
+                    campaign_id=session_snapshot.get("campaign_id", ""),
+                    campaign_name=session_snapshot.get("campaign_name", ""),
+                ),
+                timeout=settings.processing_timeout_seconds,
+            )
+            await try_send(
+                target_channel,
+                f"Session `{session_id}` moved and reprocessed in campaign `{target_campaign.get('name')}`.",
+            )
+            await try_send_file(
+                target_channel,
+                str(artifacts.full_transcript_txt_path),
+                content="## Full Transcript (attached as .txt)",
+            )
+            await try_send(target_channel, "## AI Session Summary")
+            await send_long(target_channel, artifacts.summary_markdown)
+            await ctx.followup.send(
+                f"Session `{session_id}` moved and reprocessed.",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await ctx.followup.send(
+                f"Session moved, but reprocess failed: `{exc}`",
+                ephemeral=True,
+            )
+        finally:
+            state.processing = False
+
+    async def _run_campaign_summarize(
+        ctx: discord.ApplicationContext,
+        *,
+        campaign: str,
+        from_date: str = "",
+        to_date: str = "",
+        limit: int = 500,
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        await ctx.defer(ephemeral=True)
+
+        resolved_campaign: dict[str, Any] | None
+        if campaign.strip():
+            resolved_campaign = store.find_campaign(ctx.guild.id, campaign)
+        else:
+            active_id = store.get_active_campaign_id(ctx.guild.id)
+            resolved_campaign = (
+                store.get_campaign(ctx.guild.id, active_id) if active_id else None
+            )
+        if not resolved_campaign:
+            await ctx.followup.send(
+                "Campaign not found. Select active campaign or pass campaign id/name.",
+                ephemeral=True,
+            )
+            return
+
+        from_date = from_date.strip()
+        to_date = to_date.strip()
+        parsed_from = parse_yyyy_mm_dd(from_date) if from_date else None
+        parsed_to = parse_yyyy_mm_dd(to_date) if to_date else None
+        if (from_date.strip() and not parsed_from) or (
+            to_date.strip() and not parsed_to
+        ):
+            await ctx.followup.send(
+                "Invalid date format. Use YYYY-MM-DD.",
+                ephemeral=True,
+            )
+            return
+        if parsed_from and parsed_to and parsed_from > parsed_to:
+            await ctx.followup.send(
+                "`from_date` must be <= `to_date`.",
+                ephemeral=True,
+            )
+            return
+
+        campaign_id = str(resolved_campaign.get("id") or "")
+        campaign_name = str(resolved_campaign.get("name") or "")
+        sessions = list_session_dirs_for_campaign(
+            ctx.guild.id,
+            campaign_id,
+            from_date=parsed_from,
+            to_date=parsed_to,
+            limit=max(1, limit),
+        )
+        if not sessions:
+            suffix = " in selected range" if (parsed_from or parsed_to) else ""
+            await ctx.followup.send(
+                f"No sessions found for campaign `{campaign_name}`{suffix}.",
+                ephemeral=True,
+            )
+            return
+
+        effective = store.resolve_active_campaign_settings(ctx.guild.id)
+        summary_language = str(
+            resolved_campaign.get("summary_language") or ""
+        ).strip() or effective.get("summary_language", "ru")
+        session_context = str(
+            resolved_campaign.get("session_context") or ""
+        ).strip() or effective.get("session_context", "")
+        name_hints = str(
+            resolved_campaign.get("name_hints") or ""
+        ).strip() or effective.get("name_hints", "")
+
+        chunks: list[str] = []
+        for session_dir in sessions:
+            summary_file = session_dir / "summary.md"
+            transcript_file = session_dir / "full_transcript.txt"
+            if summary_file.exists():
+                body = summary_file.read_text(encoding="utf-8", errors="ignore")
+            elif transcript_file.exists():
+                body = transcript_file.read_text(encoding="utf-8", errors="ignore")
+            else:
+                body = "_No summary/transcript file found._"
+            chunks.append(f"## Session {session_dir.name}\n{body.strip()[:20000]}")
+
+        aggregate_input = (
+            f"Campaign final summary request.\n"
+            f"Campaign: {campaign_name} ({campaign_id})\n"
+            f"Sessions included: {len(sessions)}\n\n" + "\n\n".join(chunks)
+        )
+        started = time.perf_counter()
+        try:
+            final_summary = await llm.generate_summary(
+                aggregate_input,
+                language=summary_language,
+                session_context=session_context,
+                name_hints=name_hints,
+            )
+        except Exception as exc:
+            await ctx.followup.send(
+                f"Campaign summarize failed: `{exc}`",
+                ephemeral=True,
+            )
+            return
+
+        out_dir = (
+            settings.data_dir
+            / "campaigns"
+            / str(ctx.guild.id)
+            / campaign_id
+            / "summaries"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        out_summary = out_dir / f"campaign_summary_{ts}.md"
+        out_input = out_dir / f"campaign_summary_input_{ts}.txt"
+        out_summary.write_text(final_summary, encoding="utf-8")
+        out_input.write_text(aggregate_input, encoding="utf-8")
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        await try_send(
+            target_channel,
+            (
+                f"Campaign final summary created for `{campaign_name}`. "
+                f"Sessions: `{len(sessions)}`. "
+                f"Duration: `{time.perf_counter() - started:.2f}s`."
+            ),
+        )
+        await try_send_file(
+            target_channel,
+            str(out_summary),
+            content="## Campaign Final Summary (.md)",
+        )
+        await ctx.followup.send(
+            f"Campaign summary saved: `{out_summary}`",
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
+        name="chronicle_campaign_summarize",
+        description="Generate final summary across all sessions in campaign",
+    )
+    async def chronicle_campaign_summarize(
+        ctx: discord.ApplicationContext,
+        campaign: str = discord.Option(
+            str,
+            description="Campaign id or exact name (empty = active campaign)",
+            autocomplete=campaign_autocomplete,
+            required=False,
+            default="",
+        ),
+    ) -> None:
+        await _run_campaign_summarize(ctx, campaign=campaign, limit=5000)
+
+    @bot.slash_command(
+        name="chronicle_campaign_sum_range",
+        description="Generate campaign summary with date range and limit filters",
+    )
+    async def chronicle_campaign_summarize_range(
+        ctx: discord.ApplicationContext,
+        campaign: str = discord.Option(
+            str,
+            description="Campaign id or exact name (empty = active campaign)",
+            autocomplete=campaign_autocomplete,
+            required=False,
+            default="",
+        ),
+        from_date: str = discord.Option(
+            str,
+            description="Optional from date YYYY-MM-DD",
+            required=False,
+            default="",
+        ),
+        to_date: str = discord.Option(
+            str,
+            description="Optional to date YYYY-MM-DD",
+            required=False,
+            default="",
+        ),
+        limit: int = discord.Option(
+            int,
+            description="Max sessions to include after date filter",
+            required=False,
+            default=50,
+            min_value=1,
+            max_value=500,
+        ),
+    ) -> None:
+        await _run_campaign_summarize(
+            ctx,
+            campaign=campaign,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
 
     @bot.slash_command(
         name="chronicle_reconnect",
@@ -1859,6 +2736,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                 "Previous recording is still processing.", ephemeral=True
             )
             return
+        resolved_campaign = store.resolve_active_campaign_settings(ctx.guild.id)
+        if not resolved_campaign.get("campaign_id"):
+            await ctx.followup.send(
+                "No active campaign selected. Create one with `/chronicle_campaign_create` and activate it with `/chronicle_campaign_use`.",
+                ephemeral=True,
+            )
+            return
         state.started_at_utc = datetime.now(UTC)
         state.finalizing = False
         state.segment_sinks = []
@@ -1872,6 +2756,11 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.decode_burst_skipped_cooldown = 0
         state.last_decode_burst_at_utc = None
         state.decode_recovery_cooldown_until = 0.0
+        state.campaign_id = resolved_campaign.get("campaign_id", "")
+        state.campaign_name = resolved_campaign.get("campaign_name", "")
+        state.summary_language = resolved_campaign.get("summary_language", "ru")
+        state.session_context = resolved_campaign.get("session_context", "")
+        state.name_hints = resolved_campaign.get("name_hints", "")
         decode_error_events.clear()
         stop_background_tasks(state)
         upsert_active_session(
@@ -1987,17 +2876,23 @@ def build_bot(settings: Settings) -> commands.Bot:
                         fallback_channel,
                         "Processing recording: Whisper transcription + local LLM summary...",
                     )
-                summary_language = store.get_summary_language(guild_id, default="ru")
                 logger.info(
-                    "[session] processing_begin guild_id=%s segments=%s language=%s timeout_s=%s",
+                    "[session] processing_begin guild_id=%s segments=%s campaign_id=%s language=%s timeout_s=%s",
                     guild_id,
                     len(state.segment_sinks or []),
-                    summary_language,
+                    state.campaign_id,
+                    state.summary_language,
                     settings.processing_timeout_seconds,
                 )
                 artifacts = await asyncio.wait_for(
                     processor.process_sinks(
-                        guild, state.segment_sinks, summary_language=summary_language
+                        guild,
+                        state.segment_sinks,
+                        summary_language=state.summary_language,
+                        session_context=state.session_context,
+                        name_hints=state.name_hints,
+                        campaign_id=state.campaign_id,
+                        campaign_name=state.campaign_name,
                     ),
                     timeout=settings.processing_timeout_seconds,
                 )
@@ -2105,6 +3000,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.started_at_utc = None
                 state.segment_sinks = []
                 state.decode_recovery_cooldown_until = 0.0
+                state.campaign_id = ""
+                state.campaign_name = ""
+                state.summary_language = "ru"
+                state.session_context = ""
+                state.name_hints = ""
                 stop_background_tasks(state)
                 clear_active_session(guild_id)
                 guild = bot.get_guild(guild_id)

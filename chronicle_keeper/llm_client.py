@@ -23,6 +23,23 @@ class LLMClient:
         self._warmup_on_start = settings.llm_warmup_on_start
 
     @staticmethod
+    def _context_block(session_context: str, name_hints: str) -> str:
+        parts: list[str] = []
+        if session_context.strip():
+            parts.append(
+                "Session context from DM (canonical background unless transcript directly contradicts):\n"
+                f"{session_context.strip()}"
+            )
+        if name_hints.strip():
+            parts.append(
+                "Canonical names and roles hints (prefer these spellings/roles):\n"
+                f"{name_hints.strip()}"
+            )
+        if not parts:
+            return ""
+        return "\n\n".join(parts) + "\n\n"
+
+    @staticmethod
     def _narrative_style_instruction(language_name: str) -> str:
         return (
             "Style requirements:\n"
@@ -107,7 +124,13 @@ class LLMClient:
             lines.append("")
         return "\n".join(lines).strip() + "\n"
 
-    async def generate_summary(self, transcript_text: str, language: str = "ru") -> str:
+    async def generate_summary(
+        self,
+        transcript_text: str,
+        language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+    ) -> str:
         lang = (language or "ru").lower().strip()
         if lang not in {"en", "uk", "ru"}:
             lang = "ru"
@@ -128,6 +151,7 @@ class LLMClient:
             "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
             f"{style_instruction}\n"
             f"Return all text in {language_names[lang]}.\n\n"
+            f"{self._context_block(session_context, name_hints)}"
             "Transcript:\n"
             f"{transcript_text}"
         )
@@ -140,6 +164,8 @@ class LLMClient:
         chunk_index: int,
         total_chunks: int,
         language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
     ) -> str:
         lang = (language or "ru").lower().strip()
         if lang not in {"en", "uk", "ru"}:
@@ -156,13 +182,18 @@ class LLMClient:
             "- Important NPCs/factions\n"
             "- Open threads\n"
             "- Notable player actions\n\n"
+            f"{self._context_block(session_context, name_hints)}"
             "Transcript chunk:\n"
             f"{chunk_text}"
         )
         return await self._chat(system_prompt, user_prompt)
 
     async def combine_chunk_summaries(
-        self, chunk_summaries_markdown: str, language: str = "ru"
+        self,
+        chunk_summaries_markdown: str,
+        language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
     ) -> str:
         lang = (language or "ru").lower().strip()
         if lang not in {"en", "uk", "ru"}:
@@ -183,6 +214,7 @@ class LLMClient:
             "Do not add extra top-level headers. Keep bullet lists concise.\n\n"
             f"{style_instruction}\n"
             f"Return all text in {language_names[lang]}.\n\n"
+            f"{self._context_block(session_context, name_hints)}"
             "Chunk summaries:\n"
             f"{chunk_summaries_markdown}"
         )

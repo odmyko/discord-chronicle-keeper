@@ -361,16 +361,59 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_setup_voice` - set default voice channel for recording (dropdown channel picker).
 - `/chronicle_setup_voice_here` - set your current voice channel as default recording channel.
 - `/chronicle_setup_channels` - one command to set both voice channel and transcript text channel.
-- `/chronicle_setup_language` - set summary output language (`en`, `uk`, `ru`).
+- `/chronicle_defaults_language` - set guild default summary language (`en`, `uk`, `ru`).
+- `/chronicle_defaults_context` - set guild default session context text.
+- `/chronicle_defaults_names` - set guild default canonical names/roles hints.
+- `/chronicle_campaign_create` - create a campaign.
+- `/chronicle_campaign_list` - list campaigns.
+- `/chronicle_campaign_use` - set active campaign.
+- `/chronicle_campaign_show` - show active campaign effective settings.
+- `/chronicle_campaign_context` - update active campaign context.
+- `/chronicle_campaign_names` - update active campaign names/roles hints.
+- `/chronicle_campaign_language` - update active campaign language override.
+- `/chronicle_campaign_lang_clear` - clear active campaign language override (fallback to guild default).
+- `/chronicle_campaign_summarize` - generate one final summary across all sessions in campaign.
+- `/chronicle_campaign_sum_range` - generate campaign summary with date-range and session-limit filters.
 - `/chronicle_status` - show current recorder status and reconnect/rotation/decode-burst counters, plus runtime metrics (calls/errors/latency by stage).
 - `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
+- `/chronicle_reprocess` - reprocess specific session by session id.
+- `/chronicle_sessions` - list recent sessions for this guild.
+- `/chronicle_session_move` - move a session to another campaign (optional reprocess).
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
 - `/chronicle_stop` - stop recording, build transcript and summary, publish to the chronicle channel.
 - `/chronicle_leave` - disconnect the bot from voice.
 - `/chronicle_cleanup_now` - run retention cleanup immediately (Manage Server required).
 - `/chronicle_purge_session` - delete one saved session by id (Manage Server required, `ALLOW_PURGE_COMMANDS=true`).
 - `/chronicle_purge_guild_data` - delete all saved sessions for this guild (Manage Server required; requires `PURGE` confirmation and `ALLOW_PURGE_COMMANDS=true`).
+
+Note:
+- `/chronicle_start` requires an active campaign (`/chronicle_campaign_create` + `/chronicle_campaign_use`).
+
+## Campaign Workflow (Recommended)
+
+Use this sequence to record multiple sessions into one campaign cleanly:
+
+1. Initial setup (once per guild):
+   - `/chronicle_setup_channels` (or `/chronicle_setup_voice_here` + `/chronicle_setup_here`)
+2. Create campaign:
+   - `/chronicle_campaign_create`
+3. Activate campaign before recording:
+   - `/chronicle_campaign_use` (dropdown)
+4. Optional campaign-level context:
+   - `/chronicle_campaign_context`
+   - `/chronicle_campaign_names`
+   - `/chronicle_campaign_language` (or `/chronicle_campaign_lang_clear` to use guild default)
+5. For each game session:
+   - `/chronicle_start`
+   - `/chronicle_stop`
+6. If needed:
+   - Reprocess latest: `/chronicle_reprocess_last`
+   - Reprocess specific: `/chronicle_reprocess` (dropdown)
+   - Move session to another campaign: `/chronicle_session_move` (dropdowns)
+7. Final campaign summary:
+   - All sessions: `/chronicle_campaign_summarize`
+   - Filtered range: `/chronicle_campaign_sum_range`
 
 ## Current Limitations
 
