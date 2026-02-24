@@ -613,7 +613,11 @@ def build_bot(settings: Settings) -> commands.Bot:
             campaign_name = str(campaign.get("name") or "").strip()
             if not campaign_id:
                 continue
-            if query and query not in campaign_id.lower() and query not in campaign_name.lower():
+            if (
+                query
+                and query not in campaign_id.lower()
+                and query not in campaign_name.lower()
+            ):
                 continue
             label = f"{campaign_name} ({campaign_id})" if campaign_name else campaign_id
             choices.append(discord.OptionChoice(name=label[:100], value=campaign_id))
@@ -634,7 +638,11 @@ def build_bot(settings: Settings) -> commands.Bot:
             session_id = session_dir.name
             snapshot = read_session_snapshot(session_dir)
             campaign_name = str(snapshot.get("campaign_name") or "").strip()
-            if query and query not in session_id.lower() and query not in campaign_name.lower():
+            if (
+                query
+                and query not in session_id.lower()
+                and query not in campaign_name.lower()
+            ):
                 continue
             label = f"{session_id} | {campaign_name}" if campaign_name else session_id
             choices.append(discord.OptionChoice(name=label[:100], value=session_id))

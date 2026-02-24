@@ -43,4 +43,3 @@ def test_campaign_fallback_to_guild_defaults(tmp_path: Path):
     assert resolved["summary_language"] == "uk"
     assert resolved["session_context"] == "Guild context"
     assert resolved["name_hints"] == "Guild hints"
-
