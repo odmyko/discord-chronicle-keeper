@@ -78,6 +78,10 @@ class GuildRecordingState:
     name_hints: str = ""
     done_callback: DoneCallback | None = None
     fallback_channel: discord.abc.Messageable | None = None
+    session_id: str = ""
+    session_dir: Path | None = None
+    persisted_segments: int = 0
+    restart_in_progress: bool = False
 
 
 def build_bot(settings: Settings) -> commands.Bot:
@@ -308,6 +312,15 @@ def build_bot(settings: Settings) -> commands.Bot:
         metrics.observe("discord_publish", time.perf_counter() - started, sent > 0)
         return sent
 
+    def same_messageable(
+        a: discord.abc.Messageable | None, b: discord.abc.Messageable | None
+    ) -> bool:
+        if a is None or b is None:
+            return False
+        a_id = getattr(a, "id", None)
+        b_id = getattr(b, "id", None)
+        return a_id is not None and b_id is not None and a_id == b_id
+
     async def ffprobe_audio(
         path: str,
     ) -> tuple[float, int | None, int | None, int | None]:
@@ -432,21 +445,6 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.rotation_task.cancel()
             state.rotation_task = None
 
-    def append_segment_sink_if_needed(
-        state: GuildRecordingState,
-        sink: discord.sinks.Sink | None,
-    ) -> bool:
-        if sink is None or not getattr(sink, "audio_data", None):
-            return False
-        if not sink.audio_data:
-            return False
-        if state.segment_sinks is None:
-            state.segment_sinks = []
-        if any(existing is sink for existing in state.segment_sinks):
-            return False
-        state.segment_sinks.append(sink)
-        return True
-
     def load_json_file(path: str) -> dict | None:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -517,6 +515,130 @@ def build_bot(settings: Settings) -> commands.Bot:
         payload = load_runtime_state()
         payload["active_sessions"].pop(str(guild_id), None)
         save_runtime_state(payload)
+
+    def prune_stale_active_sessions(max_age_seconds: int = 300) -> int:
+        payload = load_runtime_state()
+        active = payload.get("active_sessions", {})
+        if not isinstance(active, dict):
+            return 0
+        now = datetime.now(UTC)
+        removed = 0
+        for guild_key in list(active.keys()):
+            entry = active.get(guild_key)
+            if not isinstance(entry, dict):
+                active.pop(guild_key, None)
+                removed += 1
+                continue
+            updated_raw = str(entry.get("updated_at_utc") or "").strip()
+            if not updated_raw:
+                active.pop(guild_key, None)
+                removed += 1
+                continue
+            try:
+                updated_dt = datetime.fromisoformat(updated_raw)
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=UTC)
+            except ValueError:
+                active.pop(guild_key, None)
+                removed += 1
+                continue
+            age = (now - updated_dt).total_seconds()
+            if age <= max(30, max_age_seconds):
+                continue
+            active.pop(guild_key, None)
+            removed += 1
+        if removed > 0:
+            payload["active_sessions"] = active
+            save_runtime_state(payload)
+        return removed
+
+    def ensure_session_dir(state: GuildRecordingState, guild_id: int) -> Path:
+        if state.session_id.strip():
+            session_id = state.session_id.strip()
+        else:
+            session_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            state.session_id = session_id
+        if state.session_dir is None:
+            state.session_dir = (
+                settings.data_dir / "sessions" / str(guild_id) / session_id
+            )
+        state.session_dir.mkdir(parents=True, exist_ok=True)
+        (state.session_dir / "audio").mkdir(parents=True, exist_ok=True)
+        return state.session_dir
+
+    def write_session_checkpoint(
+        state: GuildRecordingState,
+        guild_id: int,
+        *,
+        status: str,
+        total_tracks: int | None = None,
+    ) -> None:
+        session_dir = ensure_session_dir(state, guild_id)
+        checkpoint_path = session_dir / "processing_state.json"
+        checkpoint = load_json_file(str(checkpoint_path)) or {}
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        checkpoint.update(
+            {
+                "guild_id": guild_id,
+                "started_at_utc": state.started_at_utc.isoformat()
+                if state.started_at_utc
+                else checkpoint.get("started_at_utc", datetime.now(UTC).isoformat()),
+                "campaign_id": state.campaign_id,
+                "campaign_name": state.campaign_name,
+                "summary_language_used": state.summary_language,
+                "session_context_used": state.session_context,
+                "name_hints_used": state.name_hints,
+                "status": status,
+                "segments_total": max(0, state.persisted_segments),
+                "persisted_segments": max(0, state.persisted_segments),
+                "total_tracks": total_tracks
+                if total_tracks is not None
+                else checkpoint.get("total_tracks", 0),
+            }
+        )
+        save_json_file(str(checkpoint_path), checkpoint)
+
+    async def persist_recording_segment(
+        guild: discord.Guild,
+        state: GuildRecordingState,
+        sink: discord.sinks.Sink | None,
+        *,
+        fallback_channel: discord.abc.Messageable | None = None,
+    ) -> bool:
+        if sink is None or not getattr(sink, "audio_data", None) or not sink.audio_data:
+            return False
+        try:
+            ensure_session_dir(state, guild.id)
+            segment_index = state.persisted_segments + 1
+            written = await processor.save_recording_segment(
+                guild=guild,
+                sink=sink,
+                session_dir=state.session_dir or ensure_session_dir(state, guild.id),
+                segment_index=segment_index,
+            )
+            if not written:
+                return False
+            state.persisted_segments += 1
+            write_session_checkpoint(
+                state,
+                guild.id,
+                status="recording" if not state.finalizing else "processing",
+                total_tracks=len(sink.audio_data),
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "[segment] persist_failed guild_id=%s segment=%s",
+                guild.id,
+                state.persisted_segments + 1,
+            )
+            if fallback_channel is not None:
+                await try_send(
+                    fallback_channel,
+                    "Warning: failed to persist current recording segment to disk.",
+                )
+            return False
 
     def session_timestamp_utc(session_name: str) -> datetime | None:
         try:
@@ -954,7 +1076,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 status="rotating",
                 voice_channel_id=state.voice_channel_id,
                 chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                segment_count=len(state.segment_sinks or []),
+                segment_count=state.persisted_segments,
                 finalizing=False,
             )
             try:
@@ -1046,7 +1168,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                         status="rotating",
                         voice_channel_id=state.voice_channel_id,
                         chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                        segment_count=len(state.segment_sinks or []),
+                        segment_count=state.persisted_segments,
                         finalizing=False,
                     )
                     try:
@@ -1078,6 +1200,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                 fallback_channel,
                 "Voice connection looks unstable. Attempting automatic reconnect...",
             )
+            if state.restart_in_progress:
+                logger.info(
+                    "[voice-health] reconnect_skipped guild_id=%s reason=in_progress",
+                    guild_id,
+                )
+                continue
+            state.restart_in_progress = True
             try:
                 state.reconnect_attempts += 1
                 previous_sink = state.sink
@@ -1096,31 +1225,34 @@ def build_bot(settings: Settings) -> commands.Bot:
                     guild_id=guild_id,
                     timeout_s=20.0,
                 )
-                preserved = append_segment_sink_if_needed(state, previous_sink)
+                persisted = await persist_recording_segment(
+                    guild,
+                    state,
+                    previous_sink,
+                    fallback_channel=fallback_channel,
+                )
                 state.sink = next_sink
                 upsert_active_session(
                     guild_id,
                     status="recording",
                     voice_channel_id=target_voice_channel.id,
                     chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                    segment_count=(len(state.segment_sinks) + 1)
-                    if state.segment_sinks
-                    else 1,
+                    segment_count=state.persisted_segments + 1,
                     finalizing=False,
                 )
                 await try_send(
                     fallback_channel,
                     (
                         "Voice connection recovered. Recording resumed in a new segment."
-                        if preserved
+                        if persisted
                         else "Voice connection recovered. Recording resumed."
                     ),
                 )
                 state.reconnect_successes += 1
                 logger.info(
-                    "[voice-health] recovered guild_id=%s preserved_previous_sink=%s",
+                    "[voice-health] recovered guild_id=%s persisted_previous_sink=%s",
                     guild_id,
-                    preserved,
+                    persisted,
                 )
             except Exception as exc:
                 state.reconnect_failures += 1
@@ -1129,8 +1261,10 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 await try_send(
                     fallback_channel,
-                    f"Reconnect attempt failed: `{exc}`. Will retry automatically.",
+                    f"Reconnect failed, but last segment is saved to disk: `{exc}`. Will retry automatically.",
                 )
+            finally:
+                state.restart_in_progress = False
 
     async def connect_voice_with_retry(
         guild: discord.Guild,
@@ -1173,6 +1307,11 @@ def build_bot(settings: Settings) -> commands.Bot:
                 logger.warning("[config-doctor] %s", issue)
         else:
             logger.info("[config-doctor] no obvious config issues detected")
+        removed_stale = prune_stale_active_sessions(max_age_seconds=300)
+        if removed_stale > 0:
+            logger.info(
+                "[runtime] pruned %s stale active session entrie(s)", removed_stale
+            )
         runtime_state = load_runtime_state()
         active_count = len(runtime_state.get("active_sessions", {}))
         if active_count > 0:
@@ -2612,7 +2751,12 @@ def build_bot(settings: Settings) -> commands.Bot:
                     timeout_s=20.0,
                 )
                 if previous_sink is not None:
-                    append_segment_sink_if_needed(state, previous_sink)
+                    await persist_recording_segment(
+                        ctx.guild,
+                        state,
+                        previous_sink,
+                        fallback_channel=state.fallback_channel,
+                    )
                 state.sink = resume_sink
                 stop_background_tasks(state)
                 state.health_task = asyncio.create_task(
@@ -2636,9 +2780,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                     status="recording",
                     voice_channel_id=target_channel.id,
                     chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
-                    segment_count=(len(state.segment_sinks) + 1)
-                    if state.segment_sinks
-                    else 1,
+                    segment_count=state.persisted_segments + 1,
                     finalizing=False,
                 )
                 resumed = True
@@ -2754,6 +2896,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.started_at_utc = datetime.now(UTC)
         state.finalizing = False
         state.segment_sinks = []
+        state.session_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        state.session_dir = None
+        state.persisted_segments = 0
+        state.restart_in_progress = False
         state.rotation_triggered = 0
         state.rotation_resumed = 0
         state.rotation_failed = 0
@@ -2771,6 +2917,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.name_hints = resolved_campaign.get("name_hints", "")
         decode_error_events.clear()
         stop_background_tasks(state)
+        ensure_session_dir(state, ctx.guild.id)
+        write_session_checkpoint(state, ctx.guild.id, status="recording")
         upsert_active_session(
             ctx.guild.id,
             status="starting",
@@ -2792,7 +2940,12 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             state = guild_state.setdefault(guild_id, GuildRecordingState())
             state.sink = None
-            append_segment_sink_if_needed(state, finished_sink)
+            if state.processing:
+                logger.info(
+                    "[on_finished] duplicate_event_ignored guild=%s reason=already_processing",
+                    guild_id,
+                )
+                return
 
             guild = bot.get_guild(guild_id)
             if guild is None:
@@ -2807,8 +2960,32 @@ def build_bot(settings: Settings) -> commands.Bot:
             if target_channel is None:
                 target_channel = fallback_channel
 
+            await persist_recording_segment(
+                guild,
+                state,
+                finished_sink,
+                fallback_channel=target_channel,
+            )
+
+            # During finalization, Discord can emit extra on_finished callbacks from
+            # voice reconnect/teardown races. Do not start a second processing pass.
+            if state.finalizing and state.processing:
+                logger.info(
+                    "[on_finished] duplicate_finalizing_event_ignored guild=%s tracks=%s",
+                    guild_id,
+                    len(finished_sink.audio_data),
+                )
+                return
+
             # Rotation stop: restart next segment instead of processing final output.
             if not state.finalizing:
+                if state.restart_in_progress:
+                    logger.info(
+                        "[rotation] restart_skipped guild_id=%s reason=in_progress",
+                        guild_id,
+                    )
+                    return
+                state.restart_in_progress = True
                 try:
                     target_voice = (
                         guild.get_channel(state.voice_channel_id)
@@ -2842,9 +3019,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                         status="recording",
                         voice_channel_id=target_voice.id,
                         chronicle_channel_id=store.get_chronicle_channel(guild_id),
-                        segment_count=(len(state.segment_sinks) + 1)
-                        if state.segment_sinks
-                        else 1,
+                        segment_count=state.persisted_segments + 1,
                         finalizing=False,
                     )
                     state.rotation_resumed += 1
@@ -2853,21 +3028,27 @@ def build_bot(settings: Settings) -> commands.Bot:
                     )
                 except Exception as exc:
                     state.rotation_failed += 1
+                    state.sink = None
+                    clear_active_session(guild_id)
                     await try_send(
                         target_channel,
-                        f"Rotation restart failed: `{exc}`. Use `/chronicle_start` to continue.",
+                        f"Voice reconnect failed, but segment was saved to disk. `{exc}` Use `/chronicle_start` to continue.",
                     )
+                finally:
+                    state.restart_in_progress = False
                 return
 
             state.processing = True
             processing_started = time.perf_counter()
             try:
-                if not state.segment_sinks:
+                if state.persisted_segments <= 0 or state.session_dir is None:
                     sent_no_audio = await try_send(
                         target_channel,
                         "Recording finished, but no audio data was captured.",
                     )
-                    if not sent_no_audio and target_channel is not fallback_channel:
+                    if (not sent_no_audio) and not same_messageable(
+                        target_channel, fallback_channel
+                    ):
                         await try_send(
                             fallback_channel,
                             "Recording finished, but no audio data was captured.",
@@ -2879,7 +3060,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     target_channel,
                     "Processing recording: Whisper transcription + local LLM summary...",
                 )
-                if not sent and target_channel is not fallback_channel:
+                if (not sent) and not same_messageable(
+                    target_channel, fallback_channel
+                ):
                     await try_send(
                         fallback_channel,
                         "Processing recording: Whisper transcription + local LLM summary...",
@@ -2887,15 +3070,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                 logger.info(
                     "[session] processing_begin guild_id=%s segments=%s campaign_id=%s language=%s timeout_s=%s",
                     guild_id,
-                    len(state.segment_sinks or []),
+                    state.persisted_segments,
                     state.campaign_id,
                     state.summary_language,
                     settings.processing_timeout_seconds,
                 )
                 artifacts = await asyncio.wait_for(
-                    processor.process_sinks(
-                        guild,
-                        state.segment_sinks,
+                    processor.reprocess_saved_session(
+                        session_dir=state.session_dir,
                         summary_language=state.summary_language,
                         session_context=state.session_context,
                         name_hints=state.name_hints,
@@ -2908,7 +3090,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                 posted = await try_send(
                     target_channel, f"Session saved: `{artifacts.session_dir}`"
                 )
-                if not posted and target_channel is not fallback_channel:
+                if (not posted) and not same_messageable(
+                    target_channel, fallback_channel
+                ):
                     target_channel = fallback_channel
                     await try_send(
                         target_channel, f"Session saved: `{artifacts.session_dir}`"
@@ -2918,7 +3102,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     str(artifacts.full_transcript_txt_path),
                     content="## Full Transcript (attached as .txt)",
                 )
-                if (not transcript_sent) and target_channel is not fallback_channel:
+                if (not transcript_sent) and not same_messageable(
+                    target_channel, fallback_channel
+                ):
                     await try_send_file(
                         fallback_channel,
                         str(artifacts.full_transcript_txt_path),
@@ -2932,7 +3118,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                         str(artifacts.mixed_audio_path),
                         content="## Mixed Session Audio (.mp3)",
                     )
-                    if not mixed_sent and target_channel is not fallback_channel:
+                    if (not mixed_sent) and not same_messageable(
+                        target_channel, fallback_channel
+                    ):
                         mixed_sent = await try_send_file(
                             fallback_channel,
                             str(artifacts.mixed_audio_path),
@@ -2952,7 +3140,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                             mp3_paths,
                             content="## Audio Tracks (.mp3)",
                         )
-                        if sent_count == 0 and target_channel is not fallback_channel:
+                        if (sent_count == 0) and not same_messageable(
+                            target_channel, fallback_channel
+                        ):
                             sent_count = await try_send_files(
                                 fallback_channel,
                                 mp3_paths,
@@ -2977,7 +3167,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 try:
                     await send_long(target_channel, artifacts.summary_markdown)
                 except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                    if target_channel is not fallback_channel:
+                    if not same_messageable(target_channel, fallback_channel):
                         await send_long(fallback_channel, artifacts.summary_markdown)
                 quality_report = await build_quality_report(
                     state, artifacts.speaker_transcripts
@@ -3002,11 +3192,15 @@ def build_bot(settings: Settings) -> commands.Bot:
                         "[on_finished] processing error guild=%s", guild_id
                     )
             finally:
+                state.restart_in_progress = False
                 state.processing = False
                 state.finalizing = False
                 state.voice_channel_id = None
                 state.started_at_utc = None
                 state.segment_sinks = []
+                state.session_id = ""
+                state.session_dir = None
+                state.persisted_segments = 0
                 state.decode_recovery_cooldown_until = 0.0
                 state.campaign_id = ""
                 state.campaign_name = ""
@@ -3049,7 +3243,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 status="recording",
                 voice_channel_id=voice_channel.id,
                 chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
-                segment_count=1,
+                segment_count=state.persisted_segments + 1,
                 finalizing=False,
             )
         except (RecordingException, RuntimeError) as exc:
@@ -3057,6 +3251,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.voice_channel_id = None
             state.finalizing = False
             state.started_at_utc = None
+            state.session_id = ""
+            state.session_dir = None
+            state.persisted_segments = 0
+            state.restart_in_progress = False
             state.done_callback = None
             state.fallback_channel = None
             stop_background_tasks(state)
@@ -3074,6 +3272,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             state.voice_channel_id = None
             state.finalizing = False
             state.started_at_utc = None
+            state.session_id = ""
+            state.session_dir = None
+            state.persisted_segments = 0
+            state.restart_in_progress = False
             state.done_callback = None
             state.fallback_channel = None
             stop_background_tasks(state)
@@ -3113,9 +3315,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             status="finalizing",
             voice_channel_id=state.voice_channel_id,
             chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
-            segment_count=len(state.segment_sinks or []),
+            segment_count=state.persisted_segments,
             finalizing=True,
         )
+        write_session_checkpoint(state, ctx.guild.id, status="finalizing")
         voice_client.stop_recording()
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
@@ -3132,6 +3335,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.finalizing = False
         state.voice_channel_id = None
         state.started_at_utc = None
+        state.session_id = ""
+        state.session_dir = None
+        state.persisted_segments = 0
+        state.restart_in_progress = False
         state.done_callback = None
         state.fallback_channel = None
         stop_background_tasks(state)

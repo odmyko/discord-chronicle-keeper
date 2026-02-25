@@ -115,6 +115,42 @@ class SessionProcessor:
             campaign_name=campaign_name,
         )
 
+    async def save_recording_segment(
+        self,
+        guild: discord.Guild,
+        sink: discord.sinks.Sink,
+        session_dir: Path,
+        segment_index: int,
+    ) -> list[Path]:
+        if not getattr(sink, "audio_data", None):
+            return []
+
+        audio_dir = session_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        written_paths: list[Path] = []
+
+        for user_id, audio_data in sink.audio_data.items():
+            member = guild.get_member(int(user_id))
+            speaker_name = (
+                getattr(member, "display_name", None)
+                or getattr(member, "name", None)
+                or f"user_{user_id}"
+            )
+            base_name = (
+                f"{sanitize_name(speaker_name)}_{user_id}_seg{segment_index:03d}"
+            )
+            wav_path = audio_dir / f"{base_name}.wav"
+            file_obj = audio_data.file
+            if isinstance(file_obj, BytesIO):
+                file_obj.seek(0)
+            elif hasattr(file_obj, "seek"):
+                file_obj.seek(0)
+            wav_path.write_bytes(file_obj.read())
+            compressed_path = await self._compress_audio(wav_path)
+            written_paths.append(compressed_path)
+
+        return written_paths
+
     async def process_sinks(
         self,
         guild: discord.Guild,
@@ -422,6 +458,7 @@ class SessionProcessor:
         audio_dir = session_dir / "audio"
         transcript_dir = session_dir / "transcripts"
         summary_chunks_dir = session_dir / "summary_chunks"
+        checkpoint_path = session_dir / "processing_state.json"
         if not audio_dir.exists() or not audio_dir.is_dir():
             self._observe_metric("session_reprocess", reprocess_started, False)
             raise RuntimeError(f"Session audio directory not found: {audio_dir}")
@@ -433,6 +470,23 @@ class SessionProcessor:
         if not entries:
             self._observe_metric("session_reprocess", reprocess_started, False)
             raise RuntimeError(f"No supported audio files found in {audio_dir}")
+        checkpoint: dict = {}
+        if checkpoint_path.exists():
+            try:
+                loaded = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    checkpoint = loaded
+            except Exception:
+                checkpoint = {}
+        checkpoint.update(
+            {
+                "status": "transcribing",
+                "segments_total": len(entries),
+                "persisted_segments": len(entries),
+                "total_tracks": len(entries),
+            }
+        )
+        self._write_checkpoint(checkpoint_path, checkpoint)
 
         logger.info(
             "[reprocess] start session_dir=%s tracks=%s",
@@ -530,6 +584,9 @@ class SessionProcessor:
         chunks = self._split_transcript_for_summary(
             full_transcript, self._summary_chunk_chars
         )
+        checkpoint["status"] = "summarizing"
+        checkpoint["summary_chunks_total"] = len(chunks)
+        self._write_checkpoint(checkpoint_path, checkpoint)
         if len(chunks) <= 1:
             llm_started = time.perf_counter()
             try:
@@ -565,6 +622,8 @@ class SessionProcessor:
                 self._observe_metric("llm_summarize", llm_started, True)
                 chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
                 chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
+                checkpoint["summary_chunks_done"] = idx
+                self._write_checkpoint(checkpoint_path, checkpoint)
 
             combined = "\n\n".join(chunk_summaries)
             (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
@@ -594,6 +653,9 @@ class SessionProcessor:
             self._observe_metric("session_reprocess", reprocess_started, False)
             raise
         self._observe_metric("audio_mix", mix_started, True)
+        checkpoint["final_summary_done"] = True
+        checkpoint["status"] = "done"
+        self._write_checkpoint(checkpoint_path, checkpoint)
         logger.info(
             "[reprocess] done session_dir=%s transcript_file=%s",
             session_dir,
