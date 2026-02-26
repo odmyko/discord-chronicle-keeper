@@ -2859,6 +2859,7 @@ def build_bot(settings: Settings) -> commands.Bot:
         await ctx.defer(ephemeral=True)
 
         voice_channel: VoiceLikeChannel | None = None
+        auto_notes: list[str] = []
         configured_voice_channel_id = store.get_voice_channel(ctx.guild.id)
         if configured_voice_channel_id is not None:
             configured_channel = ctx.guild.get_channel(configured_voice_channel_id)
@@ -2866,17 +2867,34 @@ def build_bot(settings: Settings) -> commands.Bot:
             if voice_like is not None:
                 voice_channel = voice_like
             else:
-                await ctx.followup.send(
-                    "Configured default voice channel was not found. Re-run /chronicle_setup_voice_here.",
-                    ephemeral=True,
+                logger.warning(
+                    "[session] configured_voice_missing guild_id=%s voice_channel_id=%s",
+                    ctx.guild.id,
+                    configured_voice_channel_id,
                 )
-                return
+                auto_notes.append(
+                    "Saved default voice channel was missing, using your current voice channel."
+                )
 
         if voice_channel is None:
             voice_channel = await resolve_invoking_voice_channel(ctx)
         if voice_channel is None:
             await ctx.followup.send("Join a voice channel first.", ephemeral=True)
             return
+        if configured_voice_channel_id != voice_channel.id:
+            store.set_voice_channel(ctx.guild.id, voice_channel.id)
+            if configured_voice_channel_id is None:
+                auto_notes.append(
+                    "Default voice channel was not set, saved your current voice channel."
+                )
+        configured_chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        if configured_chronicle_channel_id is None and isinstance(
+            ctx.channel, discord.TextChannel
+        ):
+            store.set_chronicle_channel(ctx.guild.id, ctx.channel.id)
+            auto_notes.append(
+                "Chronicle text channel was not set, saved this channel as default."
+            )
         logger.info(
             "[session] start_requested guild_id=%s requested_by=%s voice_channel_id=%s",
             ctx.guild.id,
@@ -2895,13 +2913,31 @@ def build_bot(settings: Settings) -> commands.Bot:
                 "Previous recording is still processing.", ephemeral=True
             )
             return
-        resolved_campaign = store.resolve_active_campaign_settings(ctx.guild.id)
-        if not resolved_campaign.get("campaign_id"):
-            await ctx.followup.send(
-                "No active campaign selected. Create one with `/chronicle_campaign_create` and activate it with `/chronicle_campaign_use`.",
-                ephemeral=True,
+        active_campaign_id = store.get_active_campaign_id(ctx.guild.id)
+        if not active_campaign_id:
+            campaign_name = f"Campaign {datetime.now(UTC).strftime('%Y-%m-%d')}"
+            created_campaign: dict[str, Any] | None = None
+            try:
+                created_campaign = store.create_campaign(
+                    ctx.guild.id,
+                    name=campaign_name,
+                    summary_language=store.get_default_summary_language(
+                        ctx.guild.id, default="ru"
+                    ),
+                )
+            except ValueError:
+                # Name collision: create a unique fallback name.
+                created_campaign = store.create_campaign(
+                    ctx.guild.id,
+                    name=f"{campaign_name} {datetime.now(UTC).strftime('%H%M%S')}",
+                    summary_language=store.get_default_summary_language(
+                        ctx.guild.id, default="ru"
+                    ),
+                )
+            auto_notes.append(
+                f"Created and selected campaign `{created_campaign.get('name', '')}` automatically."
             )
-            return
+        resolved_campaign = store.resolve_active_campaign_settings(ctx.guild.id)
         state.started_at_utc = datetime.now(UTC)
         state.finalizing = False
         state.segment_sinks = []
@@ -3298,9 +3334,10 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             return
 
-        await ctx.followup.send(
-            f"Recording started in {voice_channel.mention}.", ephemeral=True
-        )
+        start_message = f"Recording started in {voice_channel.mention}."
+        if auto_notes:
+            start_message += "\n" + "\n".join(f"- {note}" for note in auto_notes)
+        await ctx.followup.send(start_message, ephemeral=True)
 
     @bot.slash_command(
         name="chronicle_stop", description="Stop recording and build chronicle"
