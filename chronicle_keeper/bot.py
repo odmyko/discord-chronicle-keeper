@@ -2992,6 +2992,13 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 return
 
+            if (not state.finalizing) and (state.voice_channel_id is None):
+                logger.info(
+                    "[on_finished] stale_event_ignored guild=%s reason=no_active_voice_channel",
+                    guild_id,
+                )
+                return
+
             guild = bot.get_guild(guild_id)
             if guild is None:
                 return
