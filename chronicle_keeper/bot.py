@@ -2549,16 +2549,25 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
             return
 
-        effective = store.resolve_active_campaign_settings(ctx.guild.id)
-        summary_language = str(
-            resolved_campaign.get("summary_language") or ""
-        ).strip() or effective.get("summary_language", "ru")
-        session_context = str(
-            resolved_campaign.get("session_context") or ""
-        ).strip() or effective.get("session_context", "")
-        name_hints = str(
-            resolved_campaign.get("name_hints") or ""
-        ).strip() or effective.get("name_hints", "")
+        guild_default_language = store.get_default_summary_language(
+            ctx.guild.id, default="ru"
+        )
+        guild_default_context = store.get_default_session_context(
+            ctx.guild.id, default=""
+        )
+        guild_default_hints = store.get_default_name_hints(ctx.guild.id, default="")
+        summary_language = (
+            str(resolved_campaign.get("summary_language") or "").strip()
+            or guild_default_language
+        )
+        session_context = (
+            str(resolved_campaign.get("session_context") or "").strip()
+            or guild_default_context
+        )
+        name_hints = (
+            str(resolved_campaign.get("name_hints") or "").strip()
+            or guild_default_hints
+        )
 
         chunks: list[str] = []
         for session_dir in sessions:
