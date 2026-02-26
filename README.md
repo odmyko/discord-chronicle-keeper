@@ -3,10 +3,18 @@
 Discord bot for DnD/TTRPG with a fully local pipeline:
 - record a Discord voice channel;
 - transcribe audio through a local Whisper webservice (`onerahmet/openai-whisper-asr-webservice`);
-- generate a summary and player-facing chronicle post through a local LLM in LM Studio;
+- generate a summary and player-facing chronicle post through a local OpenAI-compatible LLM endpoint (LM Studio or Docker model runner);
 - publish everything to a dedicated text channel for chronicles.
 
-## Quickstart (5 min)
+## Choose Run Mode
+
+Pick one path first, then follow only that section:
+
+1. Local Python app + external Whisper/LLM endpoints.
+2. Docker Compose + LM Studio (default bot service, no Docker LLM model).
+3. Docker Compose + Docker model runner (`docker-llm` profile, no LM Studio required).
+
+## Quickstart (5 min, Local Python Mode)
 
 1. Clone repo and install Python deps:
 ```bash
@@ -78,7 +86,9 @@ Standalone diarization is not required: the bot receives separate tracks per Dis
 - `ffmpeg` in `PATH` (for WAV -> MP3 compression)
 - Discord bot token
 - Local Whisper service (example: `http://127.0.0.1:9000`)
-- LM Studio with OpenAI-compatible API enabled (usually `http://127.0.0.1:1234/v1`)
+- OpenAI-compatible LLM endpoint:
+  - LM Studio (usually `http://127.0.0.1:1234/v1`), or
+  - Docker Compose model runner (`docker-llm` profile)
 
 ## Detailed Setup
 
@@ -178,47 +188,60 @@ docker run --rm \
   discord-chronicle-keeper
 ```
 
-For Docker on Windows/macOS, if Whisper and LM Studio run on your host machine,
+If Whisper and LM Studio run on your host machine,
 set these in `.env`:
 
 ```env
-WHISPER_BASE_URL=http://host.docker.internal:9000
-LLM_BASE_URL=http://host.docker.internal:1234/v1
+WHISPER_BASE_URL=http://<host-ip-or-dns>:9000
+LLM_BASE_URL=http://<host-ip-or-dns>:1234/v1
 ```
 
-## Docker Compose (Bot + Whisper + LLM model)
+## Docker Compose
 
-This repo includes a full-stack compose setup:
-- `bot`: Discord Chronicle Keeper
+This repo includes compose services for both LLM modes:
+- `bot` (default): Discord Chronicle Keeper + external LM Studio endpoint
+- `bot_docker_llm` (`docker-llm` profile): Discord Chronicle Keeper + Docker model runner
 - `whisper`: `discord-chronicle-whisper5090:latest` (build recipe included)
 - `whisper_vllm` (optional profile): vLLM OpenAI-compatible transcription endpoint
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
-Start stack with classic `/asr` Whisper backend:
+Start stack with classic `/asr` Whisper backend + LM Studio (default LLM backend):
 
 ```bash
-docker compose --profile asr up -d --build
+docker compose --profile asr up -d --build --remove-orphans
 ```
 
-If you previously used an `llm` service container, clean old compose objects first:
+Start stack with classic `/asr` Whisper backend + Docker model runner:
 
 ```bash
-docker compose down --remove-orphans
-docker compose up -d --build
+docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
 ```
 
-View logs:
+View logs (LM Studio mode):
 
 ```bash
 docker compose logs -f bot
 docker compose logs -f whisper
 ```
 
+View logs (Docker LLM mode):
+
+```bash
+docker compose logs -f bot_docker_llm
+docker compose logs -f whisper
+```
+
 Start stack with vLLM Whisper backend (OpenAI transcription API):
 
 ```bash
-docker compose --profile vllm up -d --build
+docker compose --profile vllm up -d --build --remove-orphans
 docker compose logs -f whisper_vllm
+```
+
+Start stack with vLLM Whisper + Docker model runner:
+
+```bash
+docker compose --profile docker-llm --profile vllm up -d --build --remove-orphans --scale bot=0
 ```
 
 Helper to switch backend and optionally restart compose:
@@ -254,6 +277,9 @@ Notes:
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
   - `LLM_MODEL` (selected model name)
+- LM Studio default bot (`bot`) uses:
+  - `LMSTUDIO_BASE_URL` (for example `http://127.0.0.1:1234/v1`)
+  - `LMSTUDIO_MODEL` (default `local-model`)
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
@@ -286,7 +312,9 @@ WHISPER_ASR_MODEL_PATH=/models/whisper
 Restart compose after changing model settings:
 
 ```bash
-docker compose up -d --build
+docker compose --profile asr up -d --build --remove-orphans
+# or (Docker model runner backend):
+# docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
 ```
 
 Helper script (converts + updates `.env` automatically):

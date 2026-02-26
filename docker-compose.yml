@@ -1,29 +1,40 @@
+x-bot-common: &bot-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: discord-chronicle-keeper:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    WHISPER_BASE_URL: ${BOT_WHISPER_BASE_URL:-http://whisper:9000}
+    DATA_DIR: /app/data
+  volumes:
+    - ./data:/app/data
+  depends_on:
+    whisper:
+      condition: service_started
+      required: false
+    whisper_vllm:
+      condition: service_started
+      required: false
+
 services:
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: discord-chronicle-keeper:latest
-    container_name: discord-chronicle-keeper
-    restart: unless-stopped
-    env_file:
-      - .env
+    <<: *bot-common
     environment:
       WHISPER_BASE_URL: ${BOT_WHISPER_BASE_URL:-http://whisper:9000}
       DATA_DIR: /app/data
+      LLM_BASE_URL: ${LMSTUDIO_BASE_URL:?Set LMSTUDIO_BASE_URL in .env}
+      LLM_MODEL: ${LMSTUDIO_MODEL:-local-model}
+
+  bot_docker_llm:
+    <<: *bot-common
+    profiles: ["docker-llm"]
     models:
       llm:
         endpoint_var: LLM_BASE_URL
         model_var: LLM_MODEL
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      whisper:
-        condition: service_started
-        required: false
-      whisper_vllm:
-        condition: service_started
-        required: false
 
   whisper:
     profiles: ["asr"]

@@ -1,17 +1,41 @@
 # Operations Runbook
 
+## Choose Runtime Mode
+
+Pick one LLM mode first:
+
+1. `bot` + LM Studio (default service)
+2. `bot_docker_llm` + Docker model runner (`docker-llm` profile)
+
+Then pick one ASR backend:
+
+1. Classic Whisper `/asr` (`asr` profile, service `whisper`)
+2. vLLM OpenAI transcription (`vllm` profile, service `whisper_vllm`)
+
 ## Start
 
-Classic ASR profile:
+LM Studio + classic ASR:
 
 ```bash
-docker compose --profile asr up -d --build
+docker compose --profile asr up -d --build --remove-orphans
 ```
 
-vLLM profile:
+LM Studio + vLLM ASR:
 
 ```bash
-docker compose --profile vllm up -d --build
+docker compose --profile vllm up -d --build --remove-orphans
+```
+
+Docker model runner + classic ASR:
+
+```bash
+docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
+```
+
+Docker model runner + vLLM ASR:
+
+```bash
+docker compose --profile docker-llm --profile vllm up -d --build --remove-orphans --scale bot=0
 ```
 
 ## Switch backend safely
@@ -25,9 +49,11 @@ python scripts/switch_asr_backend.py --backend vllm --up
 
 Manual:
 
-1. `docker compose stop whisper whisper_vllm bot`
+1. Stop old backend service:
+   - LM Studio mode: `docker compose stop whisper whisper_vllm bot`
+   - Docker LLM mode: `docker compose stop whisper whisper_vllm bot_docker_llm`
 2. Update `.env` backend keys
-3. `docker compose --profile <asr|vllm> up -d --build`
+3. Start target profile (commands from **Start** section)
 
 ## Pre-session health check
 
@@ -55,8 +81,18 @@ Operational commands:
 
 ## Logs
 
+LM Studio mode:
+
 ```bash
 docker compose logs -f bot
+docker compose logs -f whisper
+docker compose logs -f whisper_vllm
+```
+
+Docker LLM mode:
+
+```bash
+docker compose logs -f bot_docker_llm
 docker compose logs -f whisper
 docker compose logs -f whisper_vllm
 ```
