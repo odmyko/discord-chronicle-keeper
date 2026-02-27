@@ -233,6 +233,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
         summary_chunk_chars=settings.summary_chunk_chars,
+        summary_context_relevance_gate=settings.summary_context_relevance_gate,
+        summary_context_min_relevance=settings.summary_context_min_relevance,
         metrics=metrics,
     )
     guild_state: dict[int, GuildRecordingState] = {}

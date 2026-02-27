@@ -33,6 +33,13 @@ class Settings:
     llm_temperature: float
     llm_max_tokens: int
     llm_warmup_on_start: bool
+    summary_context_relevance_gate: bool
+    summary_context_min_relevance: float
+    lmstudio_auto_load: bool
+    lmstudio_control_base_url: str
+    lmstudio_control_load_path: str
+    lmstudio_control_timeout_seconds: float
+    lmstudio_auto_load_wait_seconds: float
     processing_timeout_seconds: int
     summary_chunk_chars: int
     recording_rotation_seconds: int
@@ -74,6 +81,13 @@ def _normalize_whisper_path(api_style: str, path_value: str) -> str:
     return path
 
 
+def _derive_lmstudio_control_base_url(llm_base_url: str) -> str:
+    base = (llm_base_url or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        return base[: -len("/v1")]
+    return base
+
+
 def load_settings() -> Settings:
     load_dotenv()
 
@@ -91,6 +105,14 @@ def load_settings() -> Settings:
         llm_base_url or model_runner_base_url or "http://127.0.0.1:1234/v1"
     ).strip()
     resolved_llm_model = (llm_model or model_runner_name or "local-model").strip()
+    lmstudio_control_base_url = os.getenv(
+        "LMSTUDIO_CONTROL_BASE_URL", ""
+    ).strip().rstrip("/") or _derive_lmstudio_control_base_url(resolved_llm_base_url)
+    lmstudio_control_load_path = os.getenv(
+        "LMSTUDIO_CONTROL_LOAD_PATH", "/api/v1/models/load"
+    ).strip()
+    if not lmstudio_control_load_path.startswith("/"):
+        lmstudio_control_load_path = f"/{lmstudio_control_load_path}"
     audio_mp3_vbr_quality = int(os.getenv("AUDIO_MP3_VBR_QUALITY", "4"))
     if audio_mp3_vbr_quality < 0:
         audio_mp3_vbr_quality = 0
@@ -177,6 +199,23 @@ def load_settings() -> Settings:
         llm_warmup_on_start=_as_bool(
             os.getenv("LLM_WARMUP_ON_START", "false"), default=False
         ),
+        summary_context_relevance_gate=_as_bool(
+            os.getenv("SUMMARY_CONTEXT_RELEVANCE_GATE", "false"), default=False
+        ),
+        summary_context_min_relevance=min(
+            1.0, max(0.0, float(os.getenv("SUMMARY_CONTEXT_MIN_RELEVANCE", "0.40")))
+        ),
+        lmstudio_auto_load=_as_bool(
+            os.getenv("LMSTUDIO_AUTO_LOAD", "false"), default=False
+        ),
+        lmstudio_control_base_url=lmstudio_control_base_url,
+        lmstudio_control_load_path=lmstudio_control_load_path,
+        lmstudio_control_timeout_seconds=max(
+            1.0, float(os.getenv("LMSTUDIO_CONTROL_TIMEOUT_SECONDS", "180"))
+        ),
+        lmstudio_auto_load_wait_seconds=max(
+            0.0, float(os.getenv("LMSTUDIO_AUTO_LOAD_WAIT_SECONDS", "1.5"))
+        ),
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
         summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
@@ -255,4 +294,6 @@ def config_doctor_issues(settings: Settings) -> list[str]:
             issues.append(
                 "Whisper fallback target matches primary target; fallback has no effect."
             )
+    if settings.lmstudio_auto_load and not settings.lmstudio_control_base_url:
+        issues.append("LMSTUDIO_AUTO_LOAD=true but LMSTUDIO_CONTROL_BASE_URL is empty.")
     return issues

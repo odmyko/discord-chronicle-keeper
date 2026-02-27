@@ -41,6 +41,11 @@ Quality-gate fallback:
 - `LLM_TEMPERATURE`
 - `LLM_MAX_TOKENS`
 - `LLM_WARMUP_ON_START`
+- `LMSTUDIO_AUTO_LOAD`: attempt LM Studio model load on "No models loaded"
+- `LMSTUDIO_CONTROL_BASE_URL`: optional explicit control API base URL
+- `LMSTUDIO_CONTROL_LOAD_PATH`: model load path (default `/api/v1/models/load`)
+- `LMSTUDIO_CONTROL_TIMEOUT_SECONDS`: timeout for control load request
+- `LMSTUDIO_AUTO_LOAD_WAIT_SECONDS`: wait before retry after load request
 
 ## Audio Processing
 
@@ -56,6 +61,8 @@ Quality-gate fallback:
 
 - `PROCESSING_TIMEOUT_SECONDS`
 - `SUMMARY_CHUNK_CHARS`
+- `SUMMARY_CONTEXT_RELEVANCE_GATE`
+- `SUMMARY_CONTEXT_MIN_RELEVANCE`
 - `RECORDING_ROTATION_SECONDS`
 - `RECOVERY_AUTO_POST_PARTIAL`
 - `RECOVERY_MAX_SESSIONS`

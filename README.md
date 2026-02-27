@@ -33,7 +33,14 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
-2. Fill `.env` (`DISCORD_BOT_TOKEN`, `WHISPER_BASE_URL`, `LLM_BASE_URL` or Compose model settings).
+2. Fill `.env` basic keys:
+   - `DISCORD_BOT_TOKEN`
+   - `WHISPER_BASE_URL`
+   - `LLM_BASE_URL`
+   - `LLM_MODEL`
+
+   For Docker bot mode, `LLM_BASE_URL` must be reachable from container
+   (not `127.0.0.1` unless bot runs outside Docker).
 3. Start bot:
 ```bash
 python -m chronicle_keeper.bot
@@ -143,6 +150,12 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
   - `WHISPER_LOW_QUALITY_MIN_SEGMENTS=1`
   - if primary transcript is too short/sparse, bot retries via fallback and keeps the better result.
 - `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
+- Optional LM Studio auto-load on demand:
+  - `LMSTUDIO_AUTO_LOAD=true`
+  - model is always taken from `LLM_MODEL`
+  - optional override: `LMSTUDIO_CONTROL_BASE_URL` (if control API is on a different host/base)
+  - optional path: `LMSTUDIO_CONTROL_LOAD_PATH=/api/v1/models/load`
+  - if endpoint returns "No models loaded", bot requests model load once and retries completion.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
 - `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
 - `AUDIO_VAD_ENABLED=false` (default): keep pauses/silence as-is.
@@ -160,6 +173,10 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 Long session processing options:
 - `PROCESSING_TIMEOUT_SECONDS=7200` sets max end-of-session processing time.
 - `SUMMARY_CHUNK_CHARS=14000` controls transcript chunk size for hierarchical summarization.
+- Optional context relevance gate for off-topic sessions:
+  - `SUMMARY_CONTEXT_RELEVANCE_GATE=true`
+  - `SUMMARY_CONTEXT_MIN_RELEVANCE=0.40`
+  - if transcript relevance is below threshold, summary runs without campaign context/hints.
 - `RECORDING_ROTATION_SECONDS=1800` rotates recording into segments every 30 min (set `0` to disable).
 - `RECOVERY_AUTO_POST_PARTIAL=true` attempts startup recovery post for unfinished sessions.
 - `RECOVERY_MAX_SESSIONS=20` limits how many unfinished sessions are auto-posted per startup.
@@ -277,9 +294,6 @@ Notes:
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
   - `LLM_MODEL` (selected model name)
-- LM Studio default bot (`bot`) uses:
-  - `LMSTUDIO_BASE_URL` (for example `http://127.0.0.1:1234/v1`)
-  - `LMSTUDIO_MODEL` (default `local-model`)
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.

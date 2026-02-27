@@ -76,6 +76,8 @@ class SessionProcessor:
         audio_target_channels: int = 0,
         audio_mp3_vbr_quality: int = 4,
         summary_chunk_chars: int = 14000,
+        summary_context_relevance_gate: bool = False,
+        summary_context_min_relevance: float = 0.40,
         metrics: RuntimeMetrics | None = None,
     ) -> None:
         self._base_data_dir = base_data_dir
@@ -88,12 +90,93 @@ class SessionProcessor:
         self._audio_target_channels = max(0, audio_target_channels)
         self._audio_mp3_vbr_quality = min(9, max(0, audio_mp3_vbr_quality))
         self._summary_chunk_chars = max(4000, summary_chunk_chars)
+        self._summary_context_relevance_gate = bool(summary_context_relevance_gate)
+        self._summary_context_min_relevance = min(
+            1.0, max(0.0, float(summary_context_min_relevance))
+        )
         self._metrics = metrics
 
     def _observe_metric(self, stage: str, started: float, ok: bool) -> None:
         if self._metrics is None:
             return
         self._metrics.observe(stage, time.perf_counter() - started, ok)
+
+    @staticmethod
+    def _summary_relevance_excerpt(full_transcript: str, limit: int = 12000) -> str:
+        text = (full_transcript or "").strip()
+        if len(text) <= limit:
+            return text
+        part = max(1000, limit // 3)
+        middle_start = max(0, len(text) // 2 - part // 2)
+        middle_end = min(len(text), middle_start + part)
+        return (
+            text[:part]
+            + "\n\n...[middle omitted]...\n\n"
+            + text[middle_start:middle_end]
+            + "\n\n...[tail omitted]...\n\n"
+            + text[-part:]
+        )
+
+    async def _resolve_effective_summary_context(
+        self,
+        *,
+        full_transcript: str,
+        summary_language: str,
+        session_context: str,
+        name_hints: str,
+        checkpoint: dict,
+        checkpoint_path: Path,
+    ) -> tuple[str, str]:
+        if not self._summary_context_relevance_gate:
+            checkpoint["summary_context_applied"] = bool(
+                session_context.strip() or name_hints.strip()
+            )
+            self._write_checkpoint(checkpoint_path, checkpoint)
+            return session_context, name_hints
+        if not (session_context.strip() or name_hints.strip()):
+            checkpoint["summary_context_applied"] = False
+            checkpoint["summary_context_relevance_score"] = None
+            checkpoint["summary_context_gate_reason"] = "empty_context"
+            self._write_checkpoint(checkpoint_path, checkpoint)
+            return session_context, name_hints
+
+        excerpt = self._summary_relevance_excerpt(full_transcript)
+        gate_started = time.perf_counter()
+        try:
+            score, reason = await self._llm.assess_context_relevance(
+                excerpt,
+                session_context,
+                name_hints,
+                language=summary_language,
+            )
+            self._observe_metric("llm_context_gate", gate_started, True)
+        except Exception as exc:
+            self._observe_metric("llm_context_gate", gate_started, False)
+            checkpoint["summary_context_applied"] = True
+            checkpoint["summary_context_relevance_score"] = None
+            checkpoint["summary_context_gate_reason"] = f"gate_failed:{exc}"
+            self._write_checkpoint(checkpoint_path, checkpoint)
+            logger.warning(
+                "[processor] context gate failed, applying context by default: %s",
+                exc,
+            )
+            return session_context, name_hints
+
+        apply_context = score >= self._summary_context_min_relevance
+        checkpoint["summary_context_applied"] = apply_context
+        checkpoint["summary_context_relevance_score"] = score
+        checkpoint["summary_context_gate_reason"] = reason
+        self._write_checkpoint(checkpoint_path, checkpoint)
+        logger.info(
+            "[processor] context gate score=%.3f threshold=%.3f applied=%s reason=%s",
+            score,
+            self._summary_context_min_relevance,
+            apply_context,
+            reason,
+        )
+        if not apply_context:
+            return "", ""
+        return session_context, name_hints
 
     async def process_sink(
         self,
@@ -349,6 +432,18 @@ class SessionProcessor:
         checkpoint["status"] = "summarizing"
         self._write_checkpoint(checkpoint_path, checkpoint)
 
+        (
+            effective_session_context,
+            effective_name_hints,
+        ) = await self._resolve_effective_summary_context(
+            full_transcript=full_transcript,
+            summary_language=summary_language,
+            session_context=session_context,
+            name_hints=name_hints,
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+        )
+
         chunks = self._split_transcript_for_summary(
             full_transcript, self._summary_chunk_chars
         )
@@ -366,8 +461,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.generate_summary(
                     full_transcript,
                     language=summary_language,
-                    session_context=session_context,
-                    name_hints=name_hints,
+                    session_context=effective_session_context,
+                    name_hints=effective_name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -388,8 +483,8 @@ class SessionProcessor:
                             chunk_index=idx,
                             total_chunks=len(chunks),
                             language=summary_language,
-                            session_context=session_context,
-                            name_hints=name_hints,
+                            session_context=effective_session_context,
+                            name_hints=effective_name_hints,
                         )
                     except Exception:
                         self._observe_metric("llm_summarize", llm_started, False)
@@ -408,8 +503,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.combine_chunk_summaries(
                     combined,
                     language=summary_language,
-                    session_context=session_context,
-                    name_hints=name_hints,
+                    session_context=effective_session_context,
+                    name_hints=effective_name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -581,6 +676,18 @@ class SessionProcessor:
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
 
+        (
+            effective_session_context,
+            effective_name_hints,
+        ) = await self._resolve_effective_summary_context(
+            full_transcript=full_transcript,
+            summary_language=summary_language,
+            session_context=session_context,
+            name_hints=name_hints,
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+        )
+
         chunks = self._split_transcript_for_summary(
             full_transcript, self._summary_chunk_chars
         )
@@ -593,8 +700,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.generate_summary(
                     full_transcript,
                     language=summary_language,
-                    session_context=session_context,
-                    name_hints=name_hints,
+                    session_context=effective_session_context,
+                    name_hints=effective_name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
@@ -612,8 +719,8 @@ class SessionProcessor:
                         chunk_index=idx,
                         total_chunks=len(chunks),
                         language=summary_language,
-                        session_context=session_context,
-                        name_hints=name_hints,
+                        session_context=effective_session_context,
+                        name_hints=effective_name_hints,
                     )
                 except Exception:
                     self._observe_metric("llm_summarize", llm_started, False)
@@ -632,8 +739,8 @@ class SessionProcessor:
                 summary_markdown = await self._llm.combine_chunk_summaries(
                     combined,
                     language=summary_language,
-                    session_context=session_context,
-                    name_hints=name_hints,
+                    session_context=effective_session_context,
+                    name_hints=effective_name_hints,
                 )
             except Exception:
                 self._observe_metric("llm_summarize", llm_started, False)
