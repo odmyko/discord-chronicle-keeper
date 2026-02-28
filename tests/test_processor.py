@@ -55,12 +55,32 @@ def test_clean_transcript_text_removes_common_whisper_hallucinations():
     assert "Игрок открывает дверь" in cleaned
 
 
+def test_clean_transcript_text_removes_standalone_torzok_noise():
+    source = (
+        "ДимаTorzok DimaTorzok Dima Torzok Добавил субтитры DimaTorzok "
+        "Игроки вскрывают дверь и спорят с дуэргарами."
+    )
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert "Torzok" not in cleaned
+    assert "Игроки вскрывают дверь" in cleaned
+
+
 def test_clean_transcript_text_collapses_repeated_short_phrases():
     source = "Спасибо. Спасибо. Спасибо. Спасибо. Окей. и и и и и"
 
     cleaned = SessionProcessor._clean_transcript_text(source)
 
     assert cleaned == "Спасибо. Окей. и"
+
+
+def test_clean_transcript_text_keeps_double_repeats():
+    source = "Да. Да. Потом идем дальше."
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert cleaned == "Да. Да. Потом идем дальше."
 
 
 def test_timeline_entries_from_segments_drop_cleaned_noise():
@@ -83,6 +103,25 @@ def test_timeline_entries_from_segments_drop_cleaned_noise():
 
     assert len(entries) == 1
     assert entries[0].text == "Игрок наносит удар."
+
+
+def test_timeline_entries_from_segments_collapse_triple_repeats():
+    segments = [
+        TranscriptSegment(start=0.0, end=1.0, text="Спасибо."),
+        TranscriptSegment(start=1.0, end=2.0, text="Спасибо."),
+        TranscriptSegment(start=2.0, end=3.0, text="Спасибо."),
+        TranscriptSegment(start=3.0, end=4.0, text="Спасибо."),
+        TranscriptSegment(start=4.0, end=5.0, text="Идем дальше."),
+    ]
+
+    entries = SessionProcessor._timeline_entries_from_segments(
+        segments,
+        segment_index=1,
+        user_id=1,
+        speaker_name="alice",
+    )
+
+    assert [entry.text for entry in entries] == ["Спасибо.", "Идем дальше."]
 
 
 def test_parse_saved_audio_filename():

@@ -71,6 +71,10 @@ class SessionProcessor:
             re.IGNORECASE,
         ),
         re.compile(
+            r"\bДобавил\s+субтитры\s+[A-Za-zА-Яа-я0-9_.-]+",
+            re.IGNORECASE,
+        ),
+        re.compile(
             r"\bСпасибо за субтитры\s+(?:[A-Za-zА-Яа-я0-9_.-]+\s*){1,4}",
             re.IGNORECASE,
         ),
@@ -80,6 +84,10 @@ class SessionProcessor:
         ),
         re.compile(
             r"\b(?:Редактор|Корректор)\s+[А-ЯA-Z]\.[А-ЯA-Z][А-Яа-яA-Za-z-]+",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:ДимаTorzok|DimaTorzok|Dima\s+Torzok|Дима\s+Torzok)\b",
             re.IGNORECASE,
         ),
     )
@@ -121,6 +129,29 @@ class SessionProcessor:
             return
         self._metrics.observe(stage, time.perf_counter() - started, ok)
 
+    @staticmethod
+    def _collapse_consecutive_repeats(
+        values: list[str], *, min_run_length: int = 3
+    ) -> list[str]:
+        if not values:
+            return []
+        collapsed: list[str] = []
+        run: list[str] = [values[0]]
+        for value in values[1:]:
+            if value == run[-1]:
+                run.append(value)
+                continue
+            if len(run) >= min_run_length:
+                collapsed.append(run[0])
+            else:
+                collapsed.extend(run)
+            run = [value]
+        if len(run) >= min_run_length:
+            collapsed.append(run[0])
+        else:
+            collapsed.extend(run)
+        return collapsed
+
     @classmethod
     def _clean_transcript_text(cls, text: str) -> str:
         cleaned = (text or "").strip()
@@ -136,9 +167,7 @@ class SessionProcessor:
         cleaned = re.sub(r"([.!?…])(?:\s*\1){2,}", r"\1", cleaned)
 
         parts = re.split(r"(?<=[.!?…])\s+|\n+", cleaned)
-        collapsed: list[str] = []
-        last_norm = ""
-        repeat_count = 0
+        normalized_parts: list[tuple[str, str]] = []
         for part in parts:
             piece = part.strip(" \t\r\n-–,;:")
             if not piece:
@@ -147,15 +176,27 @@ class SessionProcessor:
             norm = re.sub(r"\s+", " ", norm).strip()
             if not norm:
                 continue
-            if norm == last_norm:
-                repeat_count += 1
-                if len(norm) <= 80 and repeat_count >= 1:
-                    continue
-            else:
-                last_norm = norm
-                repeat_count = 0
-            collapsed.append(piece)
+            normalized_parts.append((piece, norm))
 
+        collapsed: list[str] = []
+        run_pieces: list[str] = []
+        run_norm = ""
+        for piece, norm in normalized_parts:
+            if run_pieces and norm == run_norm:
+                run_pieces.append(piece)
+                continue
+            if run_pieces:
+                if len(run_pieces) >= 3 and len(run_norm) <= 80:
+                    collapsed.append(run_pieces[0])
+                else:
+                    collapsed.extend(run_pieces)
+            run_pieces = [piece]
+            run_norm = norm
+        if run_pieces:
+            if len(run_pieces) >= 3 and len(run_norm) <= 80:
+                collapsed.append(run_pieces[0])
+            else:
+                collapsed.extend(run_pieces)
         cleaned = " ".join(collapsed)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
@@ -1103,18 +1144,42 @@ class SessionProcessor:
             chunks.append("".join(current))
         return chunks
 
-    @staticmethod
+    @classmethod
     def _timeline_entries_from_segments(
+        cls,
         segments: list[TranscriptSegment],
         *,
         segment_index: int,
         user_id: int,
         speaker_name: str,
     ) -> list[TimelineEntry]:
+        if not segments:
+            return []
+
+        normalized_texts = [
+            re.sub(r"\s+", " ", seg.text.strip().lower()) for seg in segments
+        ]
+        keep_texts = cls._collapse_consecutive_repeats(
+            normalized_texts, min_run_length=3
+        )
         entries: list[TimelineEntry] = []
-        for seg in segments:
+        kept_index = 0
+        run_count = 0
+        for idx, seg in enumerate(segments):
             if not seg.text.strip():
                 continue
+            norm = normalized_texts[idx]
+            if idx > 0 and norm == normalized_texts[idx - 1]:
+                run_count += 1
+            else:
+                run_count = 1
+            next_same = idx + 1 < len(segments) and normalized_texts[idx + 1] == norm
+            if run_count >= 3 and next_same:
+                continue
+            if kept_index < len(keep_texts) and norm != keep_texts[kept_index]:
+                continue
+            if kept_index < len(keep_texts):
+                kept_index += 1
             entries.append(
                 TimelineEntry(
                     segment_index=max(0, segment_index),
