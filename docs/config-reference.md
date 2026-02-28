@@ -56,6 +56,7 @@ Quality-gate fallback:
 - `AUDIO_TARGET_SAMPLE_RATE`
 - `AUDIO_MP3_VBR_QUALITY`
 - `PUBLISH_PER_SPEAKER_AUDIO`
+- Recommended long-session speech preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`
 
 ## Session/Operations
 

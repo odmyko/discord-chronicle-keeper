@@ -162,6 +162,8 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `AUDIO_VAD_ENABLED=true`: trim longer silence using conservative ffmpeg `silenceremove` settings.
 - `AUDIO_MP3_VBR_QUALITY=4` (default): MP3 VBR quality (`0` best/largest .. `9` smallest).
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
+- Recommended long-session preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`.
+- Keep `AUDIO_VAD_ENABLED=false` for the first pass unless you specifically need silence trimming.
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
 - Extra compact preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=6`.
 - Voice decode burst guard (auto recovery for repeated decode failures):

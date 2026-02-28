@@ -5,6 +5,7 @@ from chronicle_keeper.processor import (
     SpeakerTranscript,
     sanitize_name,
 )
+from chronicle_keeper.whisper_client import TranscriptSegment
 
 
 def test_sanitize_name():
@@ -37,6 +38,51 @@ def test_build_transcript_text():
     result = SessionProcessor._build_transcript_text(items, [])
     assert "alice (1)" in result
     assert "bob (2)" in result
+
+
+def test_clean_transcript_text_removes_common_whisper_hallucinations():
+    source = (
+        "Субтитры создавал DimaTorzok Продолжение следует... "
+        "Редактор субтитров А.Семкин Корректор А.Кулакова "
+        "Игрок открывает дверь и зовет остальных."
+    )
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert "DimaTorzok" not in cleaned
+    assert "Продолжение следует" not in cleaned
+    assert "Корректор" not in cleaned
+    assert "Игрок открывает дверь" in cleaned
+
+
+def test_clean_transcript_text_collapses_repeated_short_phrases():
+    source = "Спасибо. Спасибо. Спасибо. Спасибо. Окей. и и и и и"
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert cleaned == "Спасибо. Окей. и"
+
+
+def test_timeline_entries_from_segments_drop_cleaned_noise():
+    segments = [
+        TranscriptSegment(start=0.0, end=1.0, text="Продолжение следует..."),
+        TranscriptSegment(start=1.0, end=2.0, text="Игрок наносит удар."),
+    ]
+    cleaned_segments = [
+        TranscriptSegment(start=s.start, end=s.end, text=cleaned)
+        for s in segments
+        if (cleaned := SessionProcessor._clean_transcript_text(s.text))
+    ]
+
+    entries = SessionProcessor._timeline_entries_from_segments(
+        cleaned_segments,
+        segment_index=1,
+        user_id=1,
+        speaker_name="alice",
+    )
+
+    assert len(entries) == 1
+    assert entries[0].text == "Игрок наносит удар."
 
 
 def test_parse_saved_audio_filename():

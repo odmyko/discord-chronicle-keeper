@@ -64,6 +64,26 @@ class SavedAudioEntry(NamedTuple):
 
 
 class SessionProcessor:
+    _TRANSCRIPT_NOISE_PATTERNS = (
+        re.compile(r"\bПродолжение следует(?:\.\.\.|[.!?])?", re.IGNORECASE),
+        re.compile(
+            r"\bСубтитры\s+(?:создавал|сделал|делал)\s+[A-Za-zА-Яа-я0-9_.-]+",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bСпасибо за субтитры\s+(?:[A-Za-zА-Яа-я0-9_.-]+\s*){1,4}",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:Редактор|Корректор)\s+субтитров?\s+[A-Za-zА-Яа-я0-9_.-]+",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:Редактор|Корректор)\s+[А-ЯA-Z]\.[А-ЯA-Z][А-Яа-яA-Za-z-]+",
+            re.IGNORECASE,
+        ),
+    )
+
     def __init__(
         self,
         base_data_dir: Path,
@@ -100,6 +120,45 @@ class SessionProcessor:
         if self._metrics is None:
             return
         self._metrics.observe(stage, time.perf_counter() - started, ok)
+
+    @classmethod
+    def _clean_transcript_text(cls, text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+
+        for pattern in cls._TRANSCRIPT_NOISE_PATTERNS:
+            cleaned = pattern.sub(" ", cleaned)
+
+        cleaned = re.sub(
+            r"\b([A-Za-zА-Яа-яЁё]{1,20})(?:[\s,.;:!?-]+\1){4,}\b", r"\1", cleaned
+        )
+        cleaned = re.sub(r"([.!?…])(?:\s*\1){2,}", r"\1", cleaned)
+
+        parts = re.split(r"(?<=[.!?…])\s+|\n+", cleaned)
+        collapsed: list[str] = []
+        last_norm = ""
+        repeat_count = 0
+        for part in parts:
+            piece = part.strip(" \t\r\n-–,;:")
+            if not piece:
+                continue
+            norm = re.sub(r"[^\wа-яё]+", " ", piece.lower(), flags=re.IGNORECASE)
+            norm = re.sub(r"\s+", " ", norm).strip()
+            if not norm:
+                continue
+            if norm == last_norm:
+                repeat_count += 1
+                if len(norm) <= 80 and repeat_count >= 1:
+                    continue
+            else:
+                last_norm = norm
+                repeat_count = 0
+            collapsed.append(piece)
+
+        cleaned = " ".join(collapsed)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     @staticmethod
     def _summary_relevance_excerpt(full_transcript: str, limit: int = 12000) -> str:
@@ -356,19 +415,30 @@ class SessionProcessor:
                     self._observe_metric("asr_transcribe", asr_started, False)
                     raise
                 self._observe_metric("asr_transcribe", asr_started, True)
-                transcript = content_result.text
+                transcript = self._clean_transcript_text(content_result.text)
                 if not transcript and timeline_result is not None:
-                    transcript = timeline_result.text
+                    transcript = self._clean_transcript_text(timeline_result.text)
                 logger.debug(
                     "[processor] transcribe done speaker=%s chars=%s",
                     speaker_name,
                     len(transcript),
                 )
-                timeline_segments = (
+                timeline_segments_raw = (
                     timeline_result.segments
                     if timeline_result is not None
                     else content_result.segments
                 )
+                timeline_segments = [
+                    TranscriptSegment(
+                        start=seg.start,
+                        end=seg.end,
+                        text=cleaned_text,
+                    )
+                    for seg in timeline_segments_raw
+                    if (cleaned_text := self._clean_transcript_text(seg.text))
+                ]
+                if not transcript and timeline_segments:
+                    transcript = " ".join(seg.text for seg in timeline_segments).strip()
                 timeline_entries.extend(
                     self._timeline_entries_from_segments(
                         timeline_segments,
@@ -612,16 +682,27 @@ class SessionProcessor:
                 self._observe_metric("session_reprocess", reprocess_started, False)
                 raise
             self._observe_metric("asr_transcribe", asr_started, True)
-            transcript = transcript_result.text
+            transcript = self._clean_transcript_text(transcript_result.text)
             logger.debug(
                 "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
                 entry.speaker_name,
                 entry.user_id,
                 len(transcript),
             )
+            cleaned_segments = [
+                TranscriptSegment(
+                    start=seg.start,
+                    end=seg.end,
+                    text=cleaned_text,
+                )
+                for seg in transcript_result.segments
+                if (cleaned_text := self._clean_transcript_text(seg.text))
+            ]
+            if not transcript and cleaned_segments:
+                transcript = " ".join(seg.text for seg in cleaned_segments).strip()
             timeline_entries.extend(
                 self._timeline_entries_from_segments(
-                    transcript_result.segments,
+                    cleaned_segments,
                     segment_index=entry.segment_index,
                     user_id=entry.user_id,
                     speaker_name=entry.speaker_name,
