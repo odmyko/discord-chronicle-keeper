@@ -6,9 +6,9 @@ import logging
 from pathlib import Path
 
 from .config import load_settings
+from .asr import create_asr_client
 from .llm_client import LLMClient
 from .processor import SessionProcessor
-from .whisper_client import WhisperClient
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["en", "uk", "ru"],
         help="Summary language (default: ru).",
     )
+    parser.add_argument(
+        "--audio-subdir",
+        type=str,
+        default="",
+        help=(
+            "Session audio subdirectory to process (e.g. 'audio' or 'audio_vad'). "
+            "If omitted, reprocess auto-selects based on settings."
+        ),
+    )
     return parser
 
 
@@ -60,11 +69,11 @@ async def _run() -> int:
     if not session_dir.exists() or not session_dir.is_dir():
         raise RuntimeError(f"Session directory not found: {session_dir}")
 
-    whisper = WhisperClient(settings)
+    asr_client = create_asr_client(settings)
     llm = LLMClient(settings)
     processor = SessionProcessor(
         settings.data_dir,
-        whisper,
+        asr_client,
         llm,
         audio_dual_pipeline_enabled=settings.audio_dual_pipeline_enabled,
         audio_normalize=settings.audio_normalize,
@@ -72,17 +81,20 @@ async def _run() -> int:
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
-        summary_chunk_chars=settings.summary_chunk_chars,
+        summary_context_relevance_gate=settings.summary_context_relevance_gate,
+        summary_context_min_relevance=settings.summary_context_min_relevance,
     )
 
     logger.info(
-        "[reprocess-cli] start session_dir=%s language=%s",
+        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s",
         session_dir,
         args.language,
+        (args.audio_subdir or "<auto>"),
     )
     artifacts = await processor.reprocess_saved_session(
         session_dir=session_dir,
         summary_language=args.language,
+        audio_subdir=(args.audio_subdir or None),
     )
     logger.info(
         "[reprocess-cli] done session_dir=%s transcript=%s summary=%s",

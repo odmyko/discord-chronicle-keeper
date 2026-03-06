@@ -9,14 +9,7 @@ from chronicle_keeper.processor import (
 
 def test_sanitize_name():
     assert sanitize_name(" John Galt ") == "John_Galt"
-    assert sanitize_name("Имя!?") == "unknown"
-
-
-def test_split_transcript_for_summary():
-    text = "line1\n" * 500
-    chunks = SessionProcessor._split_transcript_for_summary(text, max_chars=200)
-    assert len(chunks) > 1
-    assert all(len(c) <= 210 for c in chunks)
+    assert sanitize_name("РРјСЏ!?") == "unknown"
 
 
 def test_build_transcript_text():
@@ -34,9 +27,44 @@ def test_build_transcript_text():
             transcript="world",
         ),
     ]
-    result = SessionProcessor._build_transcript_text(items, [])
+    result = SessionProcessor._build_transcript_text(items)
     assert "alice (1)" in result
     assert "bob (2)" in result
+
+
+def test_clean_transcript_text_removes_common_hallucinations():
+    source = "DimaTorzok Игрок открывает дверь и зовет остальных."
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert "DimaTorzok" not in cleaned
+    assert "Игрок открывает дверь" in cleaned
+
+
+def test_clean_transcript_text_removes_standalone_torzok_noise():
+    source = "DimaTorzok Dima Torzok Игроки вскрывают дверь и спорят с дуэргарами."
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert "DimaTorzok" not in cleaned
+    assert "Dima Torzok" not in cleaned
+    assert "Игроки вскрывают дверь" in cleaned
+
+
+def test_clean_transcript_text_collapses_repeated_short_phrases():
+    source = "РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РћРєРµР№. Рё Рё Рё Рё Рё"
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert cleaned == "РЎРїР°СЃРёР±Рѕ. РћРєРµР№. Рё"
+
+
+def test_clean_transcript_text_keeps_double_repeats():
+    source = "Р”Р°. Р”Р°. РџРѕС‚РѕРј РёРґРµРј РґР°Р»СЊС€Рµ."
+
+    cleaned = SessionProcessor._clean_transcript_text(source)
+
+    assert cleaned == "Р”Р°. Р”Р°. РџРѕС‚РѕРј РёРґРµРј РґР°Р»СЊС€Рµ."
 
 
 def test_parse_saved_audio_filename():

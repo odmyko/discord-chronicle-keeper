@@ -12,8 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from chronicle_keeper.config import load_settings  # noqa: E402
+from chronicle_keeper.asr import create_asr_client  # noqa: E402
 from chronicle_keeper.llm_client import LLMClient  # noqa: E402
-from chronicle_keeper.whisper_client import WhisperClient  # noqa: E402
 
 
 def _find_latest_audio(search_root: Path) -> Path | None:
@@ -32,12 +32,12 @@ def _find_latest_audio(search_root: Path) -> Path | None:
 
 async def _run(audio_path: Path) -> int:
     settings = load_settings()
-    whisper = WhisperClient(settings)
+    asr = create_asr_client(settings)
     llm = LLMClient(settings)
 
     started = time.perf_counter()
-    transcript = await whisper.transcribe_file_detailed(audio_path)
-    whisper_s = time.perf_counter() - started
+    transcript = await asr.transcribe_file_detailed(audio_path)
+    asr_s = time.perf_counter() - started
 
     summary_input = transcript.text.strip() or "No speech detected in smoke test audio."
     started = time.perf_counter()
@@ -47,7 +47,7 @@ async def _run(audio_path: Path) -> int:
     print("SMOKE PASS")
     print(f"audio={audio_path}")
     print(
-        f"whisper_chars={len(transcript.text.strip())} whisper_segments={len(transcript.segments)} whisper_time_s={whisper_s:.2f}"
+        f"asr_chars={len(transcript.text.strip())} asr_segments={len(transcript.segments)} asr_time_s={asr_s:.2f}"
     )
     print(f"summary_chars={len(summary)} llm_time_s={llm_s:.2f}")
     return 0

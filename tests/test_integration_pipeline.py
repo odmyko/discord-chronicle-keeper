@@ -8,9 +8,9 @@ import wave
 
 from aiohttp import web
 
+from chronicle_keeper.asr import TranscriptResult
 from chronicle_keeper.llm_client import LLMClient
 from chronicle_keeper.processor import SessionProcessor
-from chronicle_keeper.whisper_client import WhisperClient
 
 
 def _build_wav_bytes(duration_seconds: float = 0.2, sample_rate: int = 16000) -> bytes:
@@ -46,12 +46,18 @@ class _FakeGuild:
         return SimpleNamespace(display_name=name)
 
 
-async def _run_pipeline(tmp_path: Path) -> None:
-    async def asr_handler(request: web.Request) -> web.Response:
-        form = await request.post()
-        assert "audio_file" in form
-        return web.json_response({"text": "privet mir"})
+class _FakeASRClient:
+    async def transcribe_file(self, audio_path: Path) -> str:
+        return "privet mir"
 
+    async def transcribe_file_detailed(self, audio_path: Path) -> TranscriptResult:
+        return TranscriptResult(text="privet mir", segments=[])
+
+    async def warmup(self) -> tuple[bool, str]:
+        return True, "ok"
+
+
+async def _run_pipeline(tmp_path: Path) -> None:
     async def llm_handler(request: web.Request) -> web.Response:
         payload = await request.json()
         assert payload.get("messages")
@@ -60,7 +66,6 @@ async def _run_pipeline(tmp_path: Path) -> None:
         )
 
     app = web.Application()
-    app.router.add_post("/asr", asr_handler)
     app.router.add_post("/v1/chat/completions", llm_handler)
 
     runner = web.AppRunner(app)
@@ -72,24 +77,6 @@ async def _run_pipeline(tmp_path: Path) -> None:
     port = sockets[0].getsockname()[1]
 
     settings = SimpleNamespace(
-        whisper_base_url=f"http://127.0.0.1:{port}",
-        whisper_api_style="asr",
-        whisper_asr_path="/asr",
-        whisper_openai_model="openai/whisper-large-v3-turbo",
-        whisper_openai_temperature=0.0,
-        whisper_openai_prompt="",
-        whisper_language="ru",
-        whisper_task="transcribe",
-        whisper_encode=True,
-        whisper_warmup_on_start=False,
-        whisper_fallback_enabled=False,
-        whisper_fallback_base_url="",
-        whisper_fallback_api_style="asr",
-        whisper_fallback_asr_path="/asr",
-        whisper_fallback_openai_model="openai/whisper-large-v3-turbo",
-        whisper_fallback_on_low_quality=False,
-        whisper_low_quality_min_chars=40,
-        whisper_low_quality_min_segments=1,
         llm_base_url=f"http://127.0.0.1:{port}/v1",
         llm_model="stub-model",
         llm_temperature=0.0,
@@ -97,9 +84,9 @@ async def _run_pipeline(tmp_path: Path) -> None:
         llm_warmup_on_start=False,
     )
 
-    whisper = WhisperClient(settings)
+    asr = _FakeASRClient()
     llm = LLMClient(settings)
-    processor = SessionProcessor(tmp_path, whisper, llm)
+    processor = SessionProcessor(tmp_path, asr, llm)
 
     sink = _FakeSink({"123": _FakeAudioData(_build_wav_bytes())})
     guild = _FakeGuild(42, {123: "johngalt"})

@@ -4,6 +4,10 @@
 *.pyd
 .venv/
 .venv-win/
+.venv*/
+.qwen3-asr-src/
+out_qwen_*.json
+output.txt
 .env
 .env.*
 !.env.example

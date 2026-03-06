@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -16,12 +17,12 @@ from discord.ext import commands
 from discord.sinks.errors import RecordingException
 import discord.gateway as discord_gateway
 
+from .asr import create_asr_client
 from .config import Settings, config_doctor_issues, load_settings
 from .llm_client import LLMClient
 from .metrics import RuntimeMetrics
 from .processor import SessionProcessor
 from .storage import GuildSettingsStore
-from .whisper_client import WhisperClient
 
 
 DISCORD_SAFE_LIMIT = 1900
@@ -30,6 +31,21 @@ DoneCallback = Callable[
     [discord.sinks.Sink, discord.abc.Messageable, int], Awaitable[None]
 ]
 logger = logging.getLogger(__name__)
+
+
+class VoiceE2EERequiredError(RuntimeError):
+    """Discord voice server requires DAVE/E2EE, unsupported by current voice client."""
+
+
+def _exception_chain_messages(exc: BaseException) -> list[str]:
+    messages: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        current = current.__cause__ or current.__context__
+    return messages
 
 
 def chunk_text(text: str, limit: int = DISCORD_SAFE_LIMIT) -> Iterable[str]:
@@ -86,131 +102,156 @@ class GuildRecordingState:
 
 def build_bot(settings: Settings) -> commands.Bot:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Compatibility patch for py-cord voice mode negotiation.
-    # Some Discord regions may advertise only newer AEAD mode names, and older
-    # supported_modes lists can cause gateway.py to fail with IndexError.
-    extra_voice_modes = (
-        "aead_aes256_gcm_rtpsize",
-        "aead_xchacha20_poly1305_rtpsize",
-        "xsalsa20_poly1305_lite_rtpsize",
-        "xsalsa20_poly1305_suffix",
-        "xsalsa20_poly1305_lite",
-    )
-    try:
-        supported_modes = list(
-            getattr(discord.VoiceClient, "supported_modes", ()) or ()
+    voice_patch_mode = os.getenv("VOICE_PATCH_MODE", "legacy").strip().lower()
+    if voice_patch_mode == "legacy":
+        # Compatibility patch for py-cord voice mode negotiation.
+        extra_voice_modes = (
+            "aead_aes256_gcm_rtpsize",
+            "aead_xchacha20_poly1305_rtpsize",
+            "xsalsa20_poly1305_lite_rtpsize",
+            "xsalsa20_poly1305_suffix",
+            "xsalsa20_poly1305_lite",
         )
-        for mode in extra_voice_modes:
-            if mode not in supported_modes:
-                supported_modes.append(mode)
-        discord.VoiceClient.supported_modes = tuple(supported_modes)
-    except Exception:
-        pass
-
-    # Prefer xchacha mode when available. Some py-cord builds can connect with AES mode
-    # but produce decode errors on receive in certain environments.
-    try:
-        if not getattr(
-            discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False
-        ):
-
-            async def _patched_initial_connection(self, data):
-                state = self._connection
-                state.ssrc = data["ssrc"]
-                state.voice_port = data["port"]
-                state.endpoint_ip = data["ip"]
-
-                packet = bytearray(74)
-                struct.pack_into(">H", packet, 0, 1)
-                struct.pack_into(">H", packet, 2, 70)
-                struct.pack_into(">I", packet, 4, state.ssrc)
-                state.socket.sendto(packet, (state.endpoint_ip, state.voice_port))
-                recv = await self.loop.sock_recv(state.socket, 74)
-
-                ip_start = 8
-                ip_end = recv.index(0, ip_start)
-                state.ip = recv[ip_start:ip_end].decode("ascii")
-                state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
-
-                modes = [
-                    mode
-                    for mode in data["modes"]
-                    if mode in self._connection.supported_modes
-                ]
-                preferred_order = (
-                    "aead_xchacha20_poly1305_rtpsize",
-                    "aead_aes256_gcm_rtpsize",
-                    "xsalsa20_poly1305_lite",
-                    "xsalsa20_poly1305_suffix",
-                    "xsalsa20_poly1305",
-                )
-                mode = None
-                for preferred in preferred_order:
-                    if preferred in modes:
-                        mode = preferred
-                        break
-                if mode is None:
-                    mode = modes[0]
-
-                await self.select_protocol(state.ip, state.port, mode)
-                discord_gateway._log.info(
-                    "selected the voice protocol for use (%s)", mode
-                )
-
-            discord_gateway.DiscordVoiceWebSocket.initial_connection = (
-                _patched_initial_connection
+        try:
+            supported_modes = list(
+                getattr(discord.VoiceClient, "supported_modes", ()) or ()
             )
-            discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
-    except Exception:
-        pass
+            for mode in extra_voice_modes:
+                if mode not in supported_modes:
+                    supported_modes.append(mode)
+            discord.VoiceClient.supported_modes = tuple(supported_modes)
+        except Exception:
+            pass
 
-    # Runtime support for Discord's AES-GCM RTP size mode when py-cord lacks methods.
-    try:
-        import nacl.bindings
-
-        if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
-
-            def _encrypt_aead_aes256_gcm_rtpsize(self, header: bytes, data) -> bytes:
-                nonce = bytearray(12)
-                nonce[:4] = struct.pack(">I", self._lite_nonce)
-                self.checked_add("_lite_nonce", 1, 4294967295)
-                ciphertext = nacl.bindings.crypto_aead_aes256gcm_encrypt(
-                    bytes(data),
-                    bytes(header),
-                    bytes(nonce),
-                    bytes(self.secret_key),
+        # Voice mode selection patch with explicit diagnostics.
+        try:
+            if not getattr(
+                discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False
+            ):
+                _orig_initial_connection = (
+                    discord_gateway.DiscordVoiceWebSocket.initial_connection
                 )
-                return header + ciphertext + nonce[:4]
-
-            setattr(
-                discord.VoiceClient,
-                "_encrypt_aead_aes256_gcm_rtpsize",
-                _encrypt_aead_aes256_gcm_rtpsize,
-            )
-
-        if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
-
-            def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
-                nonce = bytearray(12)
-                nonce[:4] = data[-4:]
-                payload = data[:-4]
-                decrypted = nacl.bindings.crypto_aead_aes256gcm_decrypt(
-                    bytes(payload),
-                    bytes(header),
-                    bytes(nonce),
-                    bytes(self.secret_key),
+                preferred_modes_env = os.getenv(
+                    "VOICE_MODE_PREFERENCE",
+                    "aead_aes256_gcm_rtpsize,aead_xchacha20_poly1305_rtpsize,"
+                    "xsalsa20_poly1305_lite,xsalsa20_poly1305_suffix,xsalsa20_poly1305",
                 )
-                # Discord prepends 8 bytes before opus payload for *_rtpsize modes.
-                return decrypted[8:]
+                preferred_modes = tuple(
+                    part.strip()
+                    for part in preferred_modes_env.split(",")
+                    if part.strip()
+                )
 
-            setattr(
-                discord.VoiceClient,
-                "_decrypt_aead_aes256_gcm_rtpsize",
-                _decrypt_aead_aes256_gcm_rtpsize,
-            )
-    except Exception:
-        pass
+                async def _patched_initial_connection(self, data):
+                    try:
+                        logger.info("[voice] patched_initial_connection invoked")
+                        state = self._connection
+                        state.ssrc = data["ssrc"]
+                        state.voice_port = data["port"]
+                        state.endpoint_ip = data["ip"]
+
+                        packet = bytearray(74)
+                        struct.pack_into(">H", packet, 0, 1)
+                        struct.pack_into(">H", packet, 2, 70)
+                        struct.pack_into(">I", packet, 4, state.ssrc)
+                        state.socket.sendto(
+                            packet, (state.endpoint_ip, state.voice_port)
+                        )
+                        recv = await self.loop.sock_recv(state.socket, 74)
+
+                        ip_start = 8
+                        ip_end = recv.index(0, ip_start)
+                        state.ip = recv[ip_start:ip_end].decode("ascii")
+                        state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
+
+                        server_modes = list(data.get("modes", ()) or ())
+                        compatible_modes = [
+                            mode
+                            for mode in server_modes
+                            if mode in self._connection.supported_modes
+                        ]
+                        if not compatible_modes:
+                            logger.warning(
+                                "[voice] no compatible modes. server_modes=%s supported=%s",
+                                server_modes,
+                                list(
+                                    getattr(self._connection, "supported_modes", ())
+                                    or ()
+                                ),
+                            )
+                            return await _orig_initial_connection(self, data)
+
+                        selected_mode = compatible_modes[0]
+                        for preferred in preferred_modes:
+                            if preferred in compatible_modes:
+                                selected_mode = preferred
+                                break
+
+                        logger.info(
+                            "[voice] mode negotiation server=%s compatible=%s selected=%s",
+                            server_modes,
+                            compatible_modes,
+                            selected_mode,
+                        )
+                        await self.select_protocol(state.ip, state.port, selected_mode)
+                    except Exception:
+                        logger.exception("[voice] patched_initial_connection failed")
+                        raise
+
+                discord_gateway.DiscordVoiceWebSocket.initial_connection = (
+                    _patched_initial_connection
+                )
+                discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
+        except Exception:
+            logger.exception("[voice] failed to apply initial_connection patch")
+
+        try:
+            import nacl.bindings
+
+            if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
+
+                def _encrypt_aead_aes256_gcm_rtpsize(
+                    self, header: bytes, data
+                ) -> bytes:
+                    nonce = bytearray(12)
+                    nonce[:4] = struct.pack(">I", self._lite_nonce)
+                    self.checked_add("_lite_nonce", 1, 4294967295)
+                    ciphertext = nacl.bindings.crypto_aead_aes256gcm_encrypt(
+                        bytes(data),
+                        bytes(header),
+                        bytes(nonce),
+                        bytes(self.secret_key),
+                    )
+                    return header + ciphertext + nonce[:4]
+
+                setattr(
+                    discord.VoiceClient,
+                    "_encrypt_aead_aes256_gcm_rtpsize",
+                    _encrypt_aead_aes256_gcm_rtpsize,
+                )
+
+            if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
+
+                def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
+                    nonce = bytearray(12)
+                    nonce[:4] = data[-4:]
+                    payload = data[:-4]
+                    decrypted = nacl.bindings.crypto_aead_aes256gcm_decrypt(
+                        bytes(payload),
+                        bytes(header),
+                        bytes(nonce),
+                        bytes(self.secret_key),
+                    )
+                    return decrypted[8:]
+
+                setattr(
+                    discord.VoiceClient,
+                    "_decrypt_aead_aes256_gcm_rtpsize",
+                    _decrypt_aead_aes256_gcm_rtpsize,
+                )
+        except Exception:
+            logger.exception("[voice] failed to apply AES runtime helpers")
+    logger.info("[voice] patch_mode=%s", voice_patch_mode)
 
     intents = discord.Intents.default()
     intents.voice_states = True
@@ -219,12 +260,12 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     bot = commands.Bot(command_prefix="!", intents=intents)
     store = GuildSettingsStore(settings.data_dir / "guild_settings.json")
-    whisper = WhisperClient(settings)
+    asr_client = create_asr_client(settings)
     llm = LLMClient(settings)
     metrics = RuntimeMetrics()
     processor = SessionProcessor(
         settings.data_dir,
-        whisper,
+        asr_client,
         llm,
         audio_dual_pipeline_enabled=settings.audio_dual_pipeline_enabled,
         audio_normalize=settings.audio_normalize,
@@ -232,7 +273,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
-        summary_chunk_chars=settings.summary_chunk_chars,
+        summary_context_relevance_gate=settings.summary_context_relevance_gate,
+        summary_context_min_relevance=settings.summary_context_min_relevance,
         metrics=metrics,
     )
     guild_state: dict[int, GuildRecordingState] = {}
@@ -1271,6 +1313,23 @@ def build_bot(settings: Settings) -> commands.Bot:
         voice_channel: VoiceLikeChannel,
         attempts: int = 2,
     ) -> discord.VoiceClient:
+        def _is_dave_required_error(exc: Exception) -> bool:
+            code = getattr(exc, "code", None)
+            chain_text = " | ".join(_exception_chain_messages(exc)).lower()
+            if (
+                code == 4017
+                or "4017" in chain_text
+                or "e2ee/dave protocol required" in chain_text
+                or "dave protocol required" in chain_text
+            ):
+                return True
+            vc = guild.voice_client
+            ws = getattr(vc, "ws", None) if vc is not None else None
+            ws_code = getattr(ws, "_close_code", None) or getattr(
+                ws, "close_code", None
+            )
+            return ws_code == 4017
+
         last_error: Exception | None = None
         for _ in range(attempts):
             try:
@@ -1286,9 +1345,28 @@ def build_bot(settings: Settings) -> commands.Bot:
                         await asyncio.sleep(0.5)
                         current = None
                 if current is None:
-                    current = await voice_channel.connect()
+                    # Fail fast so we can detect 4017/E2EE and report a clear message.
+                    current = await asyncio.wait_for(
+                        voice_channel.connect(reconnect=False, timeout=12.0),
+                        timeout=15.0,
+                    )
+                if not current.is_connected():
+                    ws = getattr(current, "ws", None)
+                    ws_code = getattr(ws, "_close_code", None) or getattr(
+                        ws, "close_code", None
+                    )
+                    if ws_code == 4017:
+                        raise VoiceE2EERequiredError(
+                            "Discord voice server requires DAVE/E2EE, "
+                            "which is not supported by current bot voice stack."
+                        )
                 return current
             except Exception as exc:
+                if _is_dave_required_error(exc):
+                    raise VoiceE2EERequiredError(
+                        "Discord voice server requires DAVE/E2EE, "
+                        "which is not supported by current bot voice stack."
+                    ) from exc
                 last_error = exc
                 await asyncio.sleep(1.0)
         if last_error is not None:
@@ -1321,8 +1399,8 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         await run_startup_cleanup()
         await recover_unfinished_sessions()
-        ok, details = await whisper.warmup()
-        logger.info("[whisper] warmup status=%s details=%s", ok, details)
+        ok, details = await asr_client.warmup()
+        logger.info("[asr] warmup status=%s details=%s", ok, details)
         ok, details = await llm.warmup()
         logger.info("[llm] warmup status=%s details=%s", ok, details)
 
@@ -2217,7 +2295,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         except TimeoutError:
             await try_send(
-                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+                target_channel, "Reprocess timed out. Check ASR/LLM availability."
             )
             await ctx.followup.send("Reprocess timed out.", ephemeral=True)
         except Exception as exc:
@@ -2347,7 +2425,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         except TimeoutError:
             await try_send(
-                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+                target_channel, "Reprocess timed out. Check ASR/LLM availability."
             )
             await ctx.followup.send("Reprocess timed out.", ephemeral=True)
         except Exception as exc:
@@ -3110,14 +3188,14 @@ def build_bot(settings: Settings) -> commands.Bot:
 
                 sent = await try_send(
                     target_channel,
-                    "Processing recording: Whisper transcription + local LLM summary...",
+                    "Processing recording: ASR transcription + local LLM summary...",
                 )
                 if (not sent) and not same_messageable(
                     target_channel, fallback_channel
                 ):
                     await try_send(
                         fallback_channel,
-                        "Processing recording: Whisper transcription + local LLM summary...",
+                        "Processing recording: ASR transcription + local LLM summary...",
                     )
                 logger.info(
                     "[session] processing_begin guild_id=%s segments=%s campaign_id=%s language=%s timeout_s=%s",
@@ -3233,7 +3311,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 await try_send(
                     fallback_channel,
-                    "Processing timed out. Check Whisper/LLM availability and bot logs.",
+                    "Processing timed out. Check ASR/LLM availability and bot logs.",
                 )
             except Exception as exc:
                 sent = await try_send(
@@ -3266,7 +3344,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     await guild.voice_client.disconnect(force=False)
 
         try:
-            voice_client = await connect_voice_with_retry(ctx.guild, voice_channel)
+            voice_client = await connect_voice_with_retry(
+                ctx.guild, voice_channel, attempts=1
+            )
 
             sink = discord.sinks.WaveSink()
             state.sink = sink
@@ -3298,6 +3378,32 @@ def build_bot(settings: Settings) -> commands.Bot:
                 segment_count=state.persisted_segments + 1,
                 finalizing=False,
             )
+        except VoiceE2EERequiredError:
+            state.sink = None
+            state.voice_channel_id = None
+            state.finalizing = False
+            state.started_at_utc = None
+            state.session_id = ""
+            state.session_dir = None
+            state.persisted_segments = 0
+            state.restart_in_progress = False
+            state.done_callback = None
+            state.fallback_channel = None
+            stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
+            if ctx.guild.voice_client:
+                await ctx.guild.voice_client.disconnect(force=True)
+            await try_send(
+                ctx.channel,
+                "Recording cannot start: this voice channel requires Discord DAVE/E2EE, "
+                "which is not supported by the current bot voice stack.",
+            )
+            await ctx.followup.send(
+                "Could not start recording: Discord voice now requires DAVE/E2EE for this channel.\n"
+                "Current Python voice stack does not support it yet.",
+                ephemeral=True,
+            )
+            return
         except (RecordingException, RuntimeError) as exc:
             state.sink = None
             state.voice_channel_id = None
@@ -3372,7 +3478,19 @@ def build_bot(settings: Settings) -> commands.Bot:
             finalizing=True,
         )
         write_session_checkpoint(state, ctx.guild.id, status="finalizing")
-        voice_client.stop_recording()
+        try:
+            voice_client.stop_recording()
+        except RecordingException:
+            state.finalizing = False
+            state.sink = None
+            stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
+            await ctx.respond(
+                "Recording is not active (voice connection likely failed). "
+                "Use `/chronicle_start` to start a new recording.",
+                ephemeral=True,
+            )
+            return
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
     @bot.slash_command(

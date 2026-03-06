@@ -19,18 +19,8 @@ def test_load_settings_prefers_llm_aliases(monkeypatch):
 
 def test_load_settings_defaults(monkeypatch):
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.delenv("MODEL_RUNNER_BASE_URL", raising=False)
-    monkeypatch.delenv("MODEL_RUNNER_MODEL", raising=False)
-    monkeypatch.delenv("LLM_TEMPERATURE", raising=False)
-    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
-    monkeypatch.setenv("LLM_WARMUP_ON_START", "false")
-    monkeypatch.setenv("WHISPER_API_STYLE", "asr")
-    monkeypatch.setenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo")
-    monkeypatch.setenv("WHISPER_OPENAI_TEMPERATURE", "0.0")
-    monkeypatch.setenv("WHISPER_OPENAI_PROMPT", "")
-    monkeypatch.setenv("WHISPER_WARMUP_ON_START", "false")
+    monkeypatch.setenv("RECORDING_ROTATION_SECONDS", "1800")
+    monkeypatch.setenv("PROCESSING_TIMEOUT_SECONDS", "7200")
     monkeypatch.setenv("AUDIO_TARGET_SAMPLE_RATE", "0")
     monkeypatch.setenv("AUDIO_TARGET_CHANNELS", "0")
     monkeypatch.setenv("AUDIO_MP3_VBR_QUALITY", "4")
@@ -40,14 +30,11 @@ def test_load_settings_defaults(monkeypatch):
     monkeypatch.setenv("VOICE_DECODE_BURST_WINDOW_SECONDS", "15")
     monkeypatch.setenv("VOICE_DECODE_BURST_THRESHOLD", "8")
     monkeypatch.setenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60")
-    # Keep this test deterministic even when local .env exists.
-    monkeypatch.setenv("SUMMARY_CHUNK_CHARS", "14000")
-    monkeypatch.setenv("RECORDING_ROTATION_SECONDS", "1800")
-    monkeypatch.setenv("PROCESSING_TIMEOUT_SECONDS", "7200")
-    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+    monkeypatch.setenv("ASR_LANGUAGE", "ru")
 
     settings = load_settings()
-    assert settings.summary_chunk_chars == 14000
+    assert settings.asr_backend == "qwen3_asr"
+    assert settings.asr_language == "ru"
     assert settings.recording_rotation_seconds == 1800
     assert settings.processing_timeout_seconds == 7200
     assert settings.auto_cleanup_enabled is False
@@ -63,22 +50,11 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.voice_decode_burst_window_seconds == 15
     assert settings.voice_decode_burst_threshold == 8
     assert settings.voice_decode_burst_cooldown_seconds == 60
-    assert settings.whisper_api_style == "asr"
-    assert settings.whisper_openai_model == "openai/whisper-large-v3-turbo"
-    assert settings.whisper_fallback_enabled is False
-    assert settings.whisper_fallback_base_url == ""
-    assert settings.whisper_fallback_asr_path == "/asr"
-    assert settings.whisper_fallback_on_low_quality is False
-    assert settings.whisper_low_quality_min_chars == 40
-    assert settings.whisper_low_quality_min_segments == 1
-    assert settings.llm_base_url.startswith("http://127.0.0.1:")
-    assert settings.llm_warmup_on_start is False
 
 
 def test_load_settings_audio_vad_enabled(monkeypatch):
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
     monkeypatch.setenv("AUDIO_VAD_ENABLED", "true")
-
     settings = load_settings()
     assert settings.audio_vad_enabled is True
 
@@ -86,75 +62,35 @@ def test_load_settings_audio_vad_enabled(monkeypatch):
 def test_load_settings_audio_dual_pipeline_enabled(monkeypatch):
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
     monkeypatch.setenv("AUDIO_DUAL_PIPELINE_ENABLED", "true")
-
     settings = load_settings()
     assert settings.audio_dual_pipeline_enabled is True
 
 
-def test_load_settings_whisper_openai_style(monkeypatch):
+def test_load_settings_qwen3_asr_backend(monkeypatch):
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.setenv("WHISPER_API_STYLE", "openai")
-    monkeypatch.setenv("WHISPER_ASR_PATH", "/v1/audio/transcriptions")
-    monkeypatch.setenv("WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo")
-    monkeypatch.setenv("WHISPER_OPENAI_TEMPERATURE", "0")
-    monkeypatch.setenv("WHISPER_OPENAI_PROMPT", "names: Mykola, Aria")
-    monkeypatch.setenv("WHISPER_WARMUP_ON_START", "true")
+    monkeypatch.setenv("QWEN3_ASR_MODEL", "Qwen/Qwen3-ASR-1.7B")
+    monkeypatch.setenv("QWEN3_ASR_DTYPE", "bfloat16")
+    monkeypatch.setenv("QWEN3_ASR_ATTN_IMPLEMENTATION", "flash_attention_2")
+    monkeypatch.setenv("QWEN3_ASR_MAX_NEW_TOKENS", "2048")
+    monkeypatch.setenv("QWEN3_ASR_MAX_INFERENCE_BATCH_SIZE", "16")
+    monkeypatch.setenv("QWEN3_ASR_WARMUP_ON_START", "true")
 
     settings = load_settings()
-    assert settings.whisper_api_style == "openai"
-    assert settings.whisper_asr_path == "/v1/audio/transcriptions"
-    assert settings.whisper_openai_model == "openai/whisper-large-v3-turbo"
-    assert settings.whisper_openai_temperature == 0.0
-    assert settings.whisper_openai_prompt == "names: Mykola, Aria"
-    assert settings.whisper_warmup_on_start is True
+    assert settings.asr_backend == "qwen3_asr"
+    assert settings.qwen_asr_model == "Qwen/Qwen3-ASR-1.7B"
+    assert settings.qwen_asr_dtype == "bfloat16"
+    assert settings.qwen_asr_attn_implementation == "flash_attention_2"
+    assert settings.qwen_asr_max_new_tokens == 2048
+    assert settings.qwen_asr_max_inference_batch_size == 16
+    assert settings.qwen_asr_warmup_on_start is True
 
 
-def test_load_settings_corrects_whisper_style_path_mismatch(monkeypatch):
+def test_config_doctor_detects_invalid_qwen_values(monkeypatch):
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.setenv("WHISPER_API_STYLE", "openai")
-    monkeypatch.setenv("WHISPER_ASR_PATH", "/asr")
-    settings = load_settings()
-    assert settings.whisper_api_style == "openai"
-    assert settings.whisper_asr_path == "/v1/audio/transcriptions"
+    monkeypatch.setenv("QWEN3_ASR_DTYPE", "bad")
+    monkeypatch.setenv("QWEN3_ASR_ATTN_IMPLEMENTATION", "bad")
 
-
-def test_load_settings_whisper_fallback_values(monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "true")
-    monkeypatch.setenv("WHISPER_FALLBACK_BASE_URL", "http://fallback:9000")
-    monkeypatch.setenv("WHISPER_FALLBACK_API_STYLE", "asr")
-    monkeypatch.setenv("WHISPER_FALLBACK_ASR_PATH", "/asr")
-    monkeypatch.setenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "true")
-    monkeypatch.setenv("WHISPER_LOW_QUALITY_MIN_CHARS", "30")
-    monkeypatch.setenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "2")
-    settings = load_settings()
-    assert settings.whisper_fallback_enabled is True
-    assert settings.whisper_fallback_base_url == "http://fallback:9000"
-    assert settings.whisper_fallback_api_style == "asr"
-    assert settings.whisper_fallback_asr_path == "/asr"
-    assert settings.whisper_fallback_on_low_quality is True
-    assert settings.whisper_low_quality_min_chars == 30
-    assert settings.whisper_low_quality_min_segments == 2
-
-
-def test_config_doctor_detects_same_primary_and_fallback(monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.setenv("WHISPER_BASE_URL", "http://same:9000")
-    monkeypatch.setenv("WHISPER_API_STYLE", "asr")
-    monkeypatch.setenv("WHISPER_ASR_PATH", "/asr")
-    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "true")
-    monkeypatch.setenv("WHISPER_FALLBACK_BASE_URL", "http://same:9000")
-    monkeypatch.setenv("WHISPER_FALLBACK_API_STYLE", "asr")
-    monkeypatch.setenv("WHISPER_FALLBACK_ASR_PATH", "/asr")
     settings = load_settings()
     issues = config_doctor_issues(settings)
-    assert any("fallback target matches primary" in issue.lower() for issue in issues)
-
-
-def test_config_doctor_detects_low_quality_without_fallback(monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
-    monkeypatch.setenv("WHISPER_FALLBACK_ENABLED", "false")
-    monkeypatch.setenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "true")
-    settings = load_settings()
-    issues = config_doctor_issues(settings)
-    assert any("fallback_on_low_quality" in issue.lower() for issue in issues)
+    assert any("QWEN3_ASR_DTYPE" in issue for issue in issues)
+    assert any("QWEN3_ASR_ATTN_IMPLEMENTATION" in issue for issue in issues)

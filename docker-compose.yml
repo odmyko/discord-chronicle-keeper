@@ -7,26 +7,17 @@ x-bot-common: &bot-common
   env_file:
     - .env
   environment:
-    WHISPER_BASE_URL: ${BOT_WHISPER_BASE_URL:-http://whisper:9000}
     DATA_DIR: /app/data
   volumes:
     - ./data:/app/data
-  depends_on:
-    whisper:
-      condition: service_started
-      required: false
-    whisper_vllm:
-      condition: service_started
-      required: false
 
 services:
   bot:
     <<: *bot-common
     environment:
-      WHISPER_BASE_URL: ${BOT_WHISPER_BASE_URL:-http://whisper:9000}
       DATA_DIR: /app/data
-      LLM_BASE_URL: ${LMSTUDIO_BASE_URL:?Set LMSTUDIO_BASE_URL in .env}
-      LLM_MODEL: ${LMSTUDIO_MODEL:-local-model}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
 
   bot_docker_llm:
     <<: *bot-common
@@ -35,43 +26,6 @@ services:
       llm:
         endpoint_var: LLM_BASE_URL
         model_var: LLM_MODEL
-
-  whisper:
-    profiles: ["asr"]
-    build:
-      context: ./docker/whisper5090
-      dockerfile: Dockerfile
-    image: discord-chronicle-whisper5090:latest
-    container_name: whisper5090
-    restart: unless-stopped
-    gpus: all
-    environment:
-      ASR_MODEL: ${WHISPER_ASR_MODEL:-large-v3-turbo}
-      ASR_ENGINE: ${WHISPER_ASR_ENGINE:-faster_whisper}
-      ASR_MODEL_PATH: ${WHISPER_ASR_MODEL_PATH:-/models/whisper}
-    ports:
-      - "9000:9000"
-    volumes:
-      - ./data/whisper-models:/models/whisper
-
-  whisper_vllm:
-    profiles: ["vllm"]
-    build:
-      context: ./docker/vllm-whisper-audio
-      dockerfile: Dockerfile
-    image: discord-chronicle-vllm-whisper-audio:latest
-    container_name: vllm-whisper
-    restart: unless-stopped
-    gpus: all
-    ports:
-      - "8000:8000"
-    environment:
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-    volumes:
-      - ./data/huggingface-cache:/root/.cache/huggingface
-    command:
-      - "--model"
-      - "${WHISPER_OPENAI_MODEL:-openai/whisper-large-v3-turbo}"
 
 models:
   llm:

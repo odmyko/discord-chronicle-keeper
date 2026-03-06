@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import aiohttp
+import logging
 import re
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -21,6 +25,19 @@ class LLMClient:
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
         self._warmup_on_start = settings.llm_warmup_on_start
+        self._lmstudio_auto_load = getattr(settings, "lmstudio_auto_load", False)
+        self._lmstudio_control_base_url = getattr(
+            settings, "lmstudio_control_base_url", ""
+        )
+        self._lmstudio_control_load_path = getattr(
+            settings, "lmstudio_control_load_path", "/api/v1/models/load"
+        )
+        self._lmstudio_control_timeout_seconds = float(
+            getattr(settings, "lmstudio_control_timeout_seconds", 180.0)
+        )
+        self._lmstudio_auto_load_wait_seconds = float(
+            getattr(settings, "lmstudio_auto_load_wait_seconds", 1.5)
+        )
 
     @staticmethod
     def _context_block(session_context: str, name_hints: str) -> str:
@@ -65,19 +82,85 @@ class LLMClient:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                endpoint,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-            ) as resp:
-                body = await resp.json(content_type=None)
-                if resp.status >= 400:
-                    raise RuntimeError(f"LLM error {resp.status}: {body}")
+            auto_load_attempted = False
+            while True:
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                ) as resp:
+                    body = await resp.json(content_type=None)
+                    if resp.status >= 400:
+                        if (
+                            not auto_load_attempted
+                            and self._is_no_models_loaded_error(resp.status, body)
+                            and await self._try_lmstudio_auto_load(session)
+                        ):
+                            auto_load_attempted = True
+                            if self._lmstudio_auto_load_wait_seconds > 0:
+                                await asyncio.sleep(
+                                    self._lmstudio_auto_load_wait_seconds
+                                )
+                            continue
+                        raise RuntimeError(f"LLM error {resp.status}: {body}")
+                break
 
         try:
             return body["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(f"Unexpected LLM response: {body}")
+
+    @staticmethod
+    def _is_no_models_loaded_error(status: int, body: object) -> bool:
+        if status < 400:
+            return False
+        text = str(body).lower()
+        return ("no models loaded" in text) or ("load a model" in text)
+
+    async def _try_lmstudio_auto_load(self, session: aiohttp.ClientSession) -> bool:
+        if not self._lmstudio_auto_load:
+            return False
+        if not self._lmstudio_control_base_url:
+            return False
+        model_name = (self._model or "").strip()
+        if not model_name:
+            return False
+        endpoint = (
+            f"{self._lmstudio_control_base_url}{self._lmstudio_control_load_path}"
+        )
+        payload_candidates = (
+            {"model": model_name},
+            {"identifier": model_name},
+            {"name": model_name},
+        )
+        for payload in payload_candidates:
+            try:
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(
+                        total=self._lmstudio_control_timeout_seconds
+                    ),
+                ) as resp:
+                    body = await resp.json(content_type=None)
+                    if resp.status < 400:
+                        logger.info(
+                            "[llm] lmstudio auto-load requested model=%s endpoint=%s",
+                            model_name,
+                            endpoint,
+                        )
+                        return True
+                    body_text = str(body).lower()
+                    if "already loaded" in body_text:
+                        return True
+            except Exception:
+                continue
+        logger.warning(
+            "[llm] lmstudio auto-load failed model=%s endpoint=%s",
+            model_name,
+            endpoint,
+        )
+        return False
 
     @classmethod
     def _empty_section_message(cls, language: str) -> str:
@@ -224,12 +307,66 @@ class LLMClient:
     async def warmup(self) -> tuple[bool, str]:
         if not self._warmup_on_start:
             return False, "disabled"
+        timeout_seconds = 20
+        if self._lmstudio_auto_load and self._lmstudio_control_base_url:
+            timeout_seconds = max(
+                timeout_seconds,
+                int(self._lmstudio_control_timeout_seconds + 30),
+            )
         try:
             _ = await self._chat(
                 "You are a health-check assistant. Reply with exactly: OK",
                 "OK",
-                timeout_seconds=20,
+                timeout_seconds=timeout_seconds,
             )
             return True, "ok"
         except Exception as exc:
             return False, str(exc)
+
+    async def assess_context_relevance(
+        self,
+        transcript_excerpt: str,
+        session_context: str,
+        name_hints: str,
+        *,
+        language: str = "ru",
+    ) -> tuple[float, str]:
+        prompt_language = {
+            "ru": "Russian",
+            "uk": "Ukrainian",
+            "en": "English",
+        }.get((language or "ru").lower().strip(), "Russian")
+        system_prompt = (
+            "You classify relevance between transcript and campaign context. "
+            "Return only one line in this exact format: SCORE=<0..1>;LABEL=<RELEVANT|OFFTOPIC>;REASON=<short text>."
+        )
+        user_prompt = (
+            f"Language hint for transcript: {prompt_language}\n\n"
+            "Campaign context:\n"
+            f"{session_context.strip() or '[empty]'}\n\n"
+            "Name hints:\n"
+            f"{name_hints.strip() or '[empty]'}\n\n"
+            "Transcript excerpt:\n"
+            f"{transcript_excerpt.strip()[:12000]}\n\n"
+            "Classify whether campaign context should influence summary."
+        )
+        raw = await self._chat(system_prompt, user_prompt, timeout_seconds=120)
+        text = (raw or "").strip()
+        score = 0.0
+        label = "OFFTOPIC"
+        reason = text
+        score_m = re.search(r"SCORE\s*=\s*([01](?:\.\d+)?)", text, re.IGNORECASE)
+        if score_m:
+            try:
+                score = min(1.0, max(0.0, float(score_m.group(1))))
+            except ValueError:
+                score = 0.0
+        label_m = re.search(r"LABEL\s*=\s*(RELEVANT|OFFTOPIC)", text, re.IGNORECASE)
+        if label_m:
+            label = label_m.group(1).upper()
+        reason_m = re.search(r"REASON\s*=\s*(.+)$", text, re.IGNORECASE)
+        if reason_m:
+            reason = reason_m.group(1).strip()
+        if label == "RELEVANT" and score <= 0.0:
+            score = 0.5
+        return score, reason

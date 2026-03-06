@@ -1,59 +1,54 @@
 # Troubleshooting
 
-## `/chronicle_reprocess_last` fails with DNS/host error
+## `/chronicle_reprocess_last` fails to connect to ASR
 
-Symptom:
+Symptoms:
 
-- `Cannot connect to host whisper_vllm:8000` or similar
+- timeout / disconnect during ASR stage
+- no progress after `asr_start` log line
 
-Cause:
+Checks:
 
-- backend config mismatch (`WHISPER_API_STYLE` / `BOT_WHISPER_BASE_URL` / `WHISPER_ASR_PATH`)
+- verify GPU is available in the runtime env
+- verify `QWEN3_ASR_MODEL` is downloaded and loadable
+- lower `QWEN3_ASR_MAX_INFERENCE_BATCH_SIZE` if memory pressure is high
+- use `QWEN3_ASR_DTYPE=float16` on NVIDIA/Windows by default
 
-Fix:
+## Bot hangs on startup or slash commands time out
 
-- for `asr`: `http://whisper:9000` + `/asr`
-- for `openai`: `http://whisper_vllm:8000` + `/v1/audio/transcriptions`
-- use `scripts/switch_asr_backend.py`
-
-## Bot says app is thinking / no response on start
-
-- check `docker compose logs -f bot`
+- check `docker compose logs -f bot` (or `bot_docker_llm`)
 - verify Discord intents and channel permissions
-- verify warmup is not failing repeatedly
+- verify `DISCORD_BOT_TOKEN` is valid
+- if `LLM_WARMUP_ON_START=true`, verify LLM endpoint is reachable
 
 ## Voice decode errors (`corrupted stream`, opus decode)
 
-- occasional packets can be noisy; frequent errors indicate unstable voice path
-- check reconnect counters via `/chronicle_status`
-- test with `RECORDING_ROTATION_SECONDS=0`
-- tune decode-burst guard (auto rollover + reconnect):
+- occasional errors are expected on network jitter
+- repeated bursts indicate unstable voice path
+- inspect `/chronicle_status` reconnect/decode-burst counters
+- tune:
   - `VOICE_DECODE_BURST_WINDOW_SECONDS`
   - `VOICE_DECODE_BURST_THRESHOLD`
   - `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
-- if recovery triggers too often, increase threshold and/or cooldown
-- if decode errors persist for long, check host network stability and Discord region path
 
-## No speech detected
+## No speech detected / weak transcript
 
-- verify source audio quality
-- test with `AUDIO_NORMALIZE=true`
-- test with/without `AUDIO_VAD_ENABLED`
-- compare ASR backends with `scripts/benchmark_whisper.py`
+- check raw audio quality in `data/sessions/.../audio`
+- try `AUDIO_NORMALIZE=true`
+- compare with `AUDIO_VAD_ENABLED=false` vs `true`
+- if segments are noisy or empty, try `AUDIO_DUAL_PIPELINE_ENABLED=true` as fallback mode
 
-## Whisper 500 errors
+## LLM summary quality degraded
 
-- inspect Whisper container logs
-- validate model path / engine configuration
-- for custom CT2 models, confirm required files and compatibility
+- verify correct `LLM_MODEL`
+- lower `LLM_TEMPERATURE` (`0.1-0.2` typical)
+- tune `LLM_MAX_TOKENS` for your model/context window
+- if off-topic sessions are common, enable context gate:
+  - `SUMMARY_CONTEXT_RELEVANCE_GATE=true`
+  - `SUMMARY_CONTEXT_MIN_RELEVANCE=0.40` (adjust as needed)
 
-## vLLM first start is very slow
+## Discord upload errors for audio artifacts
 
-- expected due model load + compile/warmup
-- keep container running between sessions
-- enable bot warmup (`WHISPER_WARMUP_ON_START=true`)
-
-## Forbidden / Missing Access in Discord post-processing
-
-- ensure bot has access to target text channel
-- verify channel binding with `/chronicle_setup_channels`
+- free-tier Discord upload limits may reject large `mixed_session.mp3`
+- artifacts remain on disk even when upload fails
+- increase compression (higher `AUDIO_MP3_VBR_QUALITY` value) if needed
