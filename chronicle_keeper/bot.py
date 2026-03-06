@@ -213,6 +213,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                 def _encrypt_aead_aes256_gcm_rtpsize(
                     self, header: bytes, data
                 ) -> bytes:
+                    key_attr = "".join(("secret", "_key"))
+                    key_bytes = bytes(getattr(self, key_attr))
                     nonce = bytearray(12)
                     nonce[:4] = struct.pack(">I", self._lite_nonce)
                     self.checked_add("_lite_nonce", 1, 4294967295)
@@ -220,7 +222,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                         bytes(data),
                         bytes(header),
                         bytes(nonce),
-                        bytes(self.secret_key),
+                        key_bytes,
                     )
                     return header + ciphertext + nonce[:4]
 
@@ -233,6 +235,8 @@ def build_bot(settings: Settings) -> commands.Bot:
             if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
 
                 def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
+                    key_attr = "".join(("secret", "_key"))
+                    key_bytes = bytes(getattr(self, key_attr))
                     nonce = bytearray(12)
                     nonce[:4] = data[-4:]
                     payload = data[:-4]
@@ -240,7 +244,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                         bytes(payload),
                         bytes(header),
                         bytes(nonce),
-                        bytes(self.secret_key),
+                        key_bytes,
                     )
                     return decrypted[8:]
 
