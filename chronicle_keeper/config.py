@@ -30,6 +30,8 @@ class Settings:
     llm_model: str
     llm_temperature: float
     llm_max_tokens: int
+    llm_chronicle_min_words: int
+    llm_chronicle_max_words: int
     llm_warmup_on_start: bool
     summary_context_relevance_gate: bool
     summary_context_min_relevance: float
@@ -103,6 +105,11 @@ def load_settings() -> Settings:
     if audio_mp3_vbr_quality > 9:
         audio_mp3_vbr_quality = 9
 
+    llm_chronicle_min_words = max(80, int(os.getenv("LLM_CHRONICLE_MIN_WORDS", "180")))
+    llm_chronicle_max_words = max(120, int(os.getenv("LLM_CHRONICLE_MAX_WORDS", "320")))
+    if llm_chronicle_max_words < llm_chronicle_min_words:
+        llm_chronicle_max_words = llm_chronicle_min_words
+
     resolved_asr_language = (
         os.getenv("ASR_LANGUAGE", "").strip() or os.getenv("WHISPER_LANGUAGE", "ru")
     ).strip()
@@ -161,6 +168,8 @@ def load_settings() -> Settings:
         llm_model=resolved_llm_model,
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1400")),
+        llm_chronicle_min_words=llm_chronicle_min_words,
+        llm_chronicle_max_words=llm_chronicle_max_words,
         llm_warmup_on_start=_as_bool(
             os.getenv("LLM_WARMUP_ON_START", "false"), default=False
         ),

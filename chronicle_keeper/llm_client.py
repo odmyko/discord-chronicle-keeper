@@ -24,6 +24,12 @@ class LLMClient:
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
+        self._chronicle_min_words = int(
+            getattr(settings, "llm_chronicle_min_words", 180)
+        )
+        self._chronicle_max_words = int(
+            getattr(settings, "llm_chronicle_max_words", 320)
+        )
         self._warmup_on_start = settings.llm_warmup_on_start
         self._lmstudio_auto_load = getattr(settings, "lmstudio_auto_load", False)
         self._lmstudio_control_base_url = getattr(
@@ -56,14 +62,16 @@ class LLMClient:
             return ""
         return "\n\n".join(parts) + "\n\n"
 
-    @staticmethod
-    def _narrative_style_instruction(language_name: str) -> str:
+    def _narrative_style_instruction(self, language_name: str) -> str:
         return (
             "Style requirements:\n"
             f"- Write naturally and vividly in {language_name}.\n"
             "- Keep facts grounded in transcript content; do not invent events.\n"
+            f"- Use only {language_name}; do not insert foreign words, transliteration, or mixed-language fragments.\n"
             "- Prefer concise but atmospheric phrasing suitable for fantasy RPG sessions.\n"
-            "- In 'Player-Facing Chronicle Post', use an engaging narrative tone with 2-4 short paragraphs.\n"
+            "- In 'Player-Facing Chronicle Post', use an engaging narrative tone with 3-5 medium paragraphs.\n"
+            f"- Keep 'Player-Facing Chronicle Post' around {self._chronicle_min_words}-{self._chronicle_max_words} words total.\n"
+            "- If transcript quality is noisy or details are uncertain, use cautious phrasing (e.g., 'likely', 'possibly') instead of hard claims.\n"
             "- You may add light dramatic phrasing, but preserve factual accuracy.\n"
         )
 

@@ -38,6 +38,8 @@ This project is configured via `.env`.
 - `LLM_MODEL`: model id
 - `LLM_TEMPERATURE`
 - `LLM_MAX_TOKENS`
+- `LLM_CHRONICLE_MIN_WORDS`: lower target for Player-Facing Chronicle Post length
+- `LLM_CHRONICLE_MAX_WORDS`: upper target for Player-Facing Chronicle Post length
 - `LLM_WARMUP_ON_START`
 
 ### LM Studio auto-load (optional)

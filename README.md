@@ -140,6 +140,7 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `QWEN3_ASR_*` options are only needed for Qwen-specific tuning.
 - `QWEN3_ASR_ATTN_IMPLEMENTATION=sdpa|flash_attention_2` switches attention backend.
 - `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
+- `LLM_CHRONICLE_MIN_WORDS` / `LLM_CHRONICLE_MAX_WORDS` control target length of the Player-Facing Chronicle Post section.
 - Optional LM Studio auto-load on demand:
   - `LMSTUDIO_AUTO_LOAD=true`
   - model is always taken from `LLM_MODEL`
