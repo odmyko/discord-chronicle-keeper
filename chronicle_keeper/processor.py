@@ -746,6 +746,118 @@ class SessionProcessor:
             mixed_audio_path=mixed_audio_path,
         )
 
+    async def resummarize_saved_session(
+        self,
+        session_dir: Path,
+        summary_language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+    ) -> SessionArtifacts:
+        reprocess_started = time.perf_counter()
+        transcript_dir = session_dir / "transcripts"
+        checkpoint_path = session_dir / "processing_state.json"
+        full_transcript_md_path = session_dir / "full_transcript.md"
+        full_transcript_txt_path = session_dir / "full_transcript.txt"
+
+        if not session_dir.exists() or not session_dir.is_dir():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(f"Session directory not found: {session_dir}")
+        if not transcript_dir.exists() and not full_transcript_md_path.exists():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(
+                f"No transcripts found in {session_dir} (expected transcripts/ or full_transcript.md)."
+            )
+
+        checkpoint: dict = {}
+        if checkpoint_path.exists():
+            try:
+                loaded = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    checkpoint = loaded
+            except Exception:
+                checkpoint = {}
+        checkpoint["status"] = "summarizing"
+        checkpoint["summary_chunks_total"] = 1
+        checkpoint["summary_chunks_done"] = 0
+        self._write_checkpoint(checkpoint_path, checkpoint)
+
+        full_transcript = ""
+        if full_transcript_md_path.exists():
+            full_transcript = full_transcript_md_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip()
+        elif full_transcript_txt_path.exists():
+            full_transcript = full_transcript_txt_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip()
+
+        summary_input = self._build_llm_input_from_transcript_files(
+            transcript_dir=transcript_dir,
+            fallback_full_transcript=full_transcript,
+        )
+        if not summary_input.strip():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(f"No transcript content found in {session_dir}.")
+        if not full_transcript:
+            full_transcript = summary_input
+
+        (
+            effective_session_context,
+            effective_name_hints,
+        ) = await self._resolve_effective_summary_context(
+            full_transcript=full_transcript,
+            summary_language=summary_language,
+            session_context=session_context,
+            name_hints=name_hints,
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+        )
+
+        llm_started = time.perf_counter()
+        try:
+            summary_markdown = await self._llm.generate_summary(
+                summary_input,
+                language=summary_language,
+                session_context=effective_session_context,
+                name_hints=effective_name_hints,
+            )
+        except Exception:
+            self._observe_metric("llm_summarize", llm_started, False)
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise
+        self._observe_metric("llm_summarize", llm_started, True)
+
+        summary_path = session_dir / "summary.md"
+        summary_path.write_text(summary_markdown, encoding="utf-8")
+        if not full_transcript_txt_path.exists():
+            full_transcript_txt_path.write_text(full_transcript, encoding="utf-8")
+
+        mixed_audio_path: Path | None = None
+        for candidate in (
+            session_dir / "audio" / "mixed_session.mp3",
+            session_dir / "audio_vad" / "mixed_session.mp3",
+        ):
+            if candidate.exists():
+                mixed_audio_path = candidate
+                break
+
+        checkpoint["summary_language_used"] = summary_language
+        checkpoint["summary_chunks_done"] = 1
+        checkpoint["final_summary_done"] = True
+        checkpoint["status"] = "done"
+        self._write_checkpoint(checkpoint_path, checkpoint)
+        self._observe_metric("session_reprocess", reprocess_started, True)
+
+        return SessionArtifacts(
+            session_dir=session_dir,
+            full_transcript=full_transcript,
+            full_transcript_txt_path=full_transcript_txt_path,
+            summary_markdown=summary_markdown,
+            summary_path=summary_path,
+            speaker_transcripts=[],
+            mixed_audio_path=mixed_audio_path,
+        )
+
     async def _compress_audio(self, wav_path: Path) -> Path:
         mp3_path = wav_path.with_suffix(".mp3")
         ffmpeg_args = [

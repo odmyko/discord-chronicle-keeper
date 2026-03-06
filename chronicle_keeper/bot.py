@@ -2343,6 +2343,120 @@ def build_bot(settings: Settings) -> commands.Bot:
         await ctx.respond("\n".join(lines), ephemeral=True)
 
     @bot.slash_command(
+        name="chronicle_repost",
+        description="Repost existing session artifacts without reprocessing",
+    )
+    async def chronicle_repost(
+        ctx: discord.ApplicationContext,
+        session_id: str = discord.Option(
+            str,
+            description="Session folder id, e.g. 20260219_201349",
+            autocomplete=session_autocomplete,
+            required=True,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        await ctx.defer(ephemeral=True)
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.processing:
+            await ctx.followup.send(
+                "Another processing task is already running.", ephemeral=True
+            )
+            return
+
+        session_dir = (
+            settings.data_dir / "sessions" / str(ctx.guild.id) / session_id.strip()
+        )
+        if not session_dir.exists() or not session_dir.is_dir():
+            await ctx.followup.send(
+                f"Session `{session_id}` not found.", ephemeral=True
+            )
+            return
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        transcript_path = session_dir / "full_transcript.txt"
+        summary_path = session_dir / "summary.md"
+        chunk_summaries_path = session_dir / "chunk_summaries.md"
+        mixed_audio_path = session_dir / "audio" / "mixed_session.mp3"
+        if not mixed_audio_path.exists():
+            alt_mixed = session_dir / "audio_vad" / "mixed_session.mp3"
+            mixed_audio_path = alt_mixed if alt_mixed.exists() else mixed_audio_path
+
+        posted_any = False
+        await try_send(
+            target_channel, f"Reposting saved artifacts for `{session_id}`..."
+        )
+        if transcript_path.exists():
+            posted_any = await try_send_file(
+                target_channel,
+                str(transcript_path),
+                content="## Full Transcript (attached as .txt)",
+            )
+        if mixed_audio_path.exists():
+            posted_any = (
+                await try_send_file(
+                    target_channel,
+                    str(mixed_audio_path),
+                    content="## Mixed Session Audio (.mp3)",
+                )
+                or posted_any
+            )
+        if chunk_summaries_path.exists():
+            posted_any = (
+                await try_send_file(
+                    target_channel,
+                    str(chunk_summaries_path),
+                    content="## Chunk Summaries (attached as .md)",
+                )
+                or posted_any
+            )
+        if summary_path.exists():
+            summary_text = summary_path.read_text(encoding="utf-8", errors="ignore")
+            if summary_text.strip():
+                await try_send(target_channel, "## AI Session Summary")
+                await send_long(target_channel, summary_text)
+                posted_any = True
+            else:
+                posted_any = (
+                    await try_send_file(
+                        target_channel,
+                        str(summary_path),
+                        content="## AI Session Summary (attached as .md)",
+                    )
+                    or posted_any
+                )
+
+        if not posted_any:
+            await try_send(
+                target_channel,
+                "No transcript/summary artifacts were found yet for this session.",
+            )
+            await ctx.followup.send(
+                f"Session `{session_id}` has no repostable artifacts yet.",
+                ephemeral=True,
+            )
+            return
+
+        await ctx.followup.send(
+            f"Reposted artifacts for `{session_id}`.", ephemeral=True
+        )
+
+    @bot.slash_command(
         name="chronicle_reprocess",
         description="Reprocess a specific session by ID",
     )

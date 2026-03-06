@@ -398,6 +398,7 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
 - `/chronicle_reprocess` - reprocess specific session by session id.
+- `/chronicle_repost` - repost existing artifacts for a specific session without reprocessing.
 - `/chronicle_sessions` - list recent sessions for this guild.
 - `/chronicle_session_move` - move a session to another campaign (optional reprocess).
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
@@ -528,6 +529,25 @@ This command reads files from `audio/`, re-runs ASR + LLM processing, and rewrit
 - `full_transcript.md`
 - `full_transcript.txt`
 - `summary.md`
+
+Summary-only mode (reuse existing transcripts, refresh only `summary.md`):
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --language ru --summary-only
+```
+
+## Repost Saved Artifacts To Discord (CLI)
+
+Use this to send existing artifacts to Discord without reprocessing:
+
+```bash
+python -m chronicle_keeper.repost --session-dir data/sessions/<guild_id>/<session_id>
+```
+
+Options:
+- `--channel-id <id>` - post to specific text channel (otherwise uses configured chronicle channel for guild).
+- `--mention-user-id <id>` - mention DM/user in the repost header.
+- `--no-mixed-audio` - skip uploading `mixed_session.mp3`.
 
 ## Testing
 

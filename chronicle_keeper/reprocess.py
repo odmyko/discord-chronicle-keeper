@@ -49,6 +49,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "If omitted, reprocess auto-selects based on settings."
         ),
     )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help=(
+            "Skip ASR and regenerate only summary.md from existing transcripts "
+            "(transcripts/*.md or full_transcript.md)."
+        ),
+    )
     return parser
 
 
@@ -86,16 +94,23 @@ async def _run() -> int:
     )
 
     logger.info(
-        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s",
+        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s summary_only=%s",
         session_dir,
         args.language,
         (args.audio_subdir or "<auto>"),
+        args.summary_only,
     )
-    artifacts = await processor.reprocess_saved_session(
-        session_dir=session_dir,
-        summary_language=args.language,
-        audio_subdir=(args.audio_subdir or None),
-    )
+    if args.summary_only:
+        artifacts = await processor.resummarize_saved_session(
+            session_dir=session_dir,
+            summary_language=args.language,
+        )
+    else:
+        artifacts = await processor.reprocess_saved_session(
+            session_dir=session_dir,
+            summary_language=args.language,
+            audio_subdir=(args.audio_subdir or None),
+        )
     logger.info(
         "[reprocess-cli] done session_dir=%s transcript=%s summary=%s",
         artifacts.session_dir,
