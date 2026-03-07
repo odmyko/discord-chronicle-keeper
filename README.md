@@ -396,6 +396,11 @@ Stop:
 docker compose down
 ```
 
+Fast rebuild tips:
+- If image is already built and only runtime env changed: `docker compose up -d` (no `--build`).
+- Rebuild only bot image after code changes: `docker compose build bot_sidecar && docker compose up -d bot_sidecar`.
+- Rebuild only GPU bot image: `docker compose build bot_sidecar_gpu && docker compose up -d bot_sidecar_gpu`.
+
 Start only sidecar runtime/API (for contract/integration testing):
 
 ```bash

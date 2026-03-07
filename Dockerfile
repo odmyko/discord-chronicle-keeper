@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,10 +16,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN if [ -n "$TORCH_VERSION" ] && [ -n "$TORCH_WHL_INDEX_URL" ]; then \
-      pip install --no-cache-dir "torch==${TORCH_VERSION}" --index-url "${TORCH_WHL_INDEX_URL}"; \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -n "$TORCH_VERSION" ] && [ -n "$TORCH_WHL_INDEX_URL" ]; then \
+      pip install "torch==${TORCH_VERSION}" --index-url "${TORCH_WHL_INDEX_URL}"; \
     fi
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY chronicle_keeper ./chronicle_keeper
 COPY README.md ./

@@ -1,8 +1,14 @@
 .git
 .venv
+.venv*
 .venv-win
 .vscode
 __pycache__
 *.pyc
 data
 .env
+.pre-commit-cache
+.pytest_cache
+.mypy_cache
+.tmp
+output.txt

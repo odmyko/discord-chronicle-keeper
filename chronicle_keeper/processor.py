@@ -556,6 +556,7 @@ class SessionProcessor:
         campaign_id: str = "",
         campaign_name: str = "",
         audio_subdir: str | None = None,
+        skip_existing_transcripts: bool = False,
     ) -> SessionArtifacts:
         reprocess_started = time.perf_counter()
         audio_dir, selected_audio_subdir = self._resolve_audio_dir_for_reprocess(
@@ -594,10 +595,11 @@ class SessionProcessor:
         self._write_checkpoint(checkpoint_path, checkpoint)
 
         logger.info(
-            "[reprocess] start session_dir=%s tracks=%s audio_subdir=%s",
+            "[reprocess] start session_dir=%s tracks=%s audio_subdir=%s skip_existing_transcripts=%s",
             session_dir,
             len(entries),
             selected_audio_subdir,
+            skip_existing_transcripts,
         )
 
         speaker_items: list[SpeakerTranscript] = []
@@ -605,40 +607,54 @@ class SessionProcessor:
             OrderedDict()
         )
         segment_audio_paths: dict[int, list[Path]] = {}
+        reused_existing = 0
         for entry in entries:
-            logger.debug(
-                "[reprocess] transcribe start speaker=%s user_id=%s file=%s",
-                entry.speaker_name,
-                entry.user_id,
-                entry.path.name,
-            )
-            asr_started = time.perf_counter()
-            try:
-                transcript_result = await self._asr.transcribe_file_detailed(entry.path)
-            except Exception:
-                self._observe_metric("asr_transcribe", asr_started, False)
-                self._observe_metric("session_reprocess", reprocess_started, False)
-                raise
-            self._observe_metric("asr_transcribe", asr_started, True)
-            transcript = self._clean_transcript_text(transcript_result.text)
-            logger.debug(
-                "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
-                entry.speaker_name,
-                entry.user_id,
-                len(transcript),
-            )
-            if not transcript:
-                cleaned_segments = [
-                    self._clean_transcript_text(seg.text)
-                    for seg in transcript_result.segments
-                ]
-                cleaned_segments = [seg for seg in cleaned_segments if seg]
-                if cleaned_segments:
-                    transcript = " ".join(cleaned_segments).strip()
             transcript_path = transcript_dir / f"{entry.path.stem}.md"
-            transcript_path.write_text(
-                transcript or "_[no speech detected]_", encoding="utf-8"
-            )
+            transcript = ""
+            if skip_existing_transcripts and transcript_path.exists():
+                existing = transcript_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ).strip()
+                if existing:
+                    transcript = existing
+                    reused_existing += 1
+
+            if not transcript:
+                logger.debug(
+                    "[reprocess] transcribe start speaker=%s user_id=%s file=%s",
+                    entry.speaker_name,
+                    entry.user_id,
+                    entry.path.name,
+                )
+                asr_started = time.perf_counter()
+                try:
+                    transcript_result = await self._asr.transcribe_file_detailed(
+                        entry.path
+                    )
+                except Exception:
+                    self._observe_metric("asr_transcribe", asr_started, False)
+                    self._observe_metric("session_reprocess", reprocess_started, False)
+                    raise
+                self._observe_metric("asr_transcribe", asr_started, True)
+                transcript = self._clean_transcript_text(transcript_result.text)
+                logger.debug(
+                    "[reprocess] transcribe done speaker=%s user_id=%s chars=%s",
+                    entry.speaker_name,
+                    entry.user_id,
+                    len(transcript),
+                )
+                if not transcript:
+                    cleaned_segments = [
+                        self._clean_transcript_text(seg.text)
+                        for seg in transcript_result.segments
+                    ]
+                    cleaned_segments = [seg for seg in cleaned_segments if seg]
+                    if cleaned_segments:
+                        transcript = " ".join(cleaned_segments).strip()
+                transcript_path.write_text(
+                    transcript or "_[no speech detected]_", encoding="utf-8"
+                )
+
             speaker_items.append(
                 SpeakerTranscript(
                     user_id=entry.user_id,
@@ -724,9 +740,10 @@ class SessionProcessor:
         checkpoint["status"] = "done"
         self._write_checkpoint(checkpoint_path, checkpoint)
         logger.info(
-            "[reprocess] done session_dir=%s transcript_file=%s",
+            "[reprocess] done session_dir=%s transcript_file=%s reused_existing_transcripts=%s",
             session_dir,
             full_transcript_txt_path.name,
+            reused_existing,
         )
         self._observe_metric("session_reprocess", reprocess_started, True)
         return SessionArtifacts(

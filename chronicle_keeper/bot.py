@@ -380,93 +380,10 @@ def build_bot(settings: Settings) -> commands.Bot:
         b_id = getattr(b, "id", None)
         return a_id is not None and b_id is not None and a_id == b_id
 
-    async def ffprobe_audio(
-        path: str,
-    ) -> tuple[float, int | None, int | None, int | None]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration,bit_rate",
-                "-show_entries",
-                "stream=sample_rate,channels",
-                "-of",
-                "default=nokey=1:noprint_wrappers=1",
-                path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            return 0.0, None, None, None
-        out, _ = await proc.communicate()
-        if proc.returncode != 0 or not out:
-            return 0.0, None, None, None
-        lines = [
-            line.strip()
-            for line in out.decode("utf-8", errors="ignore").splitlines()
-            if line.strip()
-        ]
-        # ffprobe default writer prints format entries first, then stream entries.
-        # Expected order for our query: duration, bit_rate, sample_rate, channels.
-        duration = 0.0
-        bit_rate: int | None = None
-        sample_rate: int | None = None
-        channels: int | None = None
-        if len(lines) > 0:
-            try:
-                duration = float(lines[0])
-            except ValueError:
-                duration = 0.0
-        if len(lines) > 1:
-            try:
-                bit_rate = int(float(lines[1]))
-            except ValueError:
-                bit_rate = None
-        if len(lines) > 2:
-            try:
-                sample_rate = int(lines[2])
-            except ValueError:
-                sample_rate = None
-        if len(lines) > 3:
-            try:
-                channels = int(lines[3])
-            except ValueError:
-                channels = None
-        return duration, bit_rate, sample_rate, channels
-
     async def build_quality_report(
         state: GuildRecordingState,
         speaker_items: list,
     ) -> str:
-        durations: list[float] = []
-        bitrates: list[int] = []
-        sample_rates: list[int] = []
-        channels_list: list[int] = []
-        for item in speaker_items:
-            duration, bit_rate, sample_rate, channels = await ffprobe_audio(
-                str(item.audio_path)
-            )
-            if duration > 0:
-                durations.append(duration)
-            if bit_rate:
-                bitrates.append(bit_rate)
-            if sample_rate:
-                sample_rates.append(sample_rate)
-            if channels:
-                channels_list.append(channels)
-
-        total_duration = sum(durations)
-        avg_bitrate_kbps = (
-            (sum(bitrates) / len(bitrates) / 1000.0) if bitrates else None
-        )
-        dominant_sample_rate = (
-            max(sample_rates, key=sample_rates.count) if sample_rates else None
-        )
-        dominant_channels = (
-            max(channels_list, key=channels_list.count) if channels_list else None
-        )
         elapsed_s = (
             (datetime.now(UTC) - state.started_at_utc).total_seconds()
             if state.started_at_utc is not None
@@ -483,27 +400,21 @@ def build_bot(settings: Settings) -> commands.Bot:
         )
         if elapsed_s is not None:
             lines.append(f"- Session wall time: `{elapsed_s:.1f}s`")
-        if total_duration > 0:
-            lines.append(f"- Sum of track durations: `{total_duration:.1f}s`")
-        if avg_bitrate_kbps is not None:
-            lines.append(f"- Average encoded bitrate: `{avg_bitrate_kbps:.1f} kbps`")
-        if dominant_sample_rate is not None:
-            lines.append(f"- Sample rate (dominant): `{dominant_sample_rate} Hz`")
-        if dominant_channels is not None:
-            lines.append(f"- Channels (dominant): `{dominant_channels}`")
         lines.append(
             "- Tip: if audio sounds choppy, try `RECORDING_ROTATION_SECONDS=0` and monitor reconnect counters."
         )
         return "\n".join(lines)
 
-    def stop_background_tasks(state: GuildRecordingState) -> None:
+    def stop_background_tasks(
+        state: GuildRecordingState, *, cancel_live_transcribe: bool = True
+    ) -> None:
         if state.health_task is not None:
             state.health_task.cancel()
             state.health_task = None
         if state.rotation_task is not None:
             state.rotation_task.cancel()
             state.rotation_task = None
-        if state.live_transcribe_task is not None:
+        if cancel_live_transcribe and state.live_transcribe_task is not None:
             state.live_transcribe_task.cancel()
             state.live_transcribe_task = None
 
@@ -3987,7 +3898,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 return
             state.finalizing = True
-            stop_background_tasks(state)
+            # Keep in-flight live ASR running; finalize step awaits it before summary.
+            stop_background_tasks(state, cancel_live_transcribe=False)
             upsert_active_session(
                 ctx.guild.id,
                 status="finalizing",
@@ -4059,6 +3971,14 @@ def build_bot(settings: Settings) -> commands.Bot:
                         state.summary_language,
                         settings.processing_timeout_seconds,
                     )
+                    skip_existing_transcripts = (
+                        settings.live_chunk_transcribe_on_rotation
+                    )
+                    logger.info(
+                        "[session] sidecar_processing_mode guild_id=%s skip_existing_transcripts=%s",
+                        ctx.guild.id,
+                        skip_existing_transcripts,
+                    )
                     artifacts = await asyncio.wait_for(
                         processor.reprocess_saved_session(
                             session_dir=state.session_dir,
@@ -4067,6 +3987,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                             name_hints=state.name_hints,
                             campaign_id=state.campaign_id,
                             campaign_name=state.campaign_name,
+                            skip_existing_transcripts=skip_existing_transcripts,
                         ),
                         timeout=settings.processing_timeout_seconds,
                     )
