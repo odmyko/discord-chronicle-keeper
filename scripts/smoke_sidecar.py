@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from chronicle_keeper.voice_sidecar_client import VoiceSidecarClient
+from chronicle_keeper.voice_sidecar_client import VoiceSidecarClient  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
