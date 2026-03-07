@@ -9,29 +9,29 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class Settings:
+    asr_backend: str
+    asr_language: str
+    asr_dtype: str
+    asr_max_new_tokens: int
     discord_bot_token: str
-    whisper_base_url: str
-    whisper_api_style: str
-    whisper_asr_path: str
-    whisper_openai_model: str
-    whisper_openai_temperature: float
-    whisper_openai_prompt: str
-    whisper_language: str
-    whisper_task: str
-    whisper_encode: bool
-    whisper_warmup_on_start: bool
-    whisper_fallback_enabled: bool
-    whisper_fallback_base_url: str
-    whisper_fallback_api_style: str
-    whisper_fallback_asr_path: str
-    whisper_fallback_openai_model: str
-    whisper_fallback_on_low_quality: bool
-    whisper_low_quality_min_chars: int
-    whisper_low_quality_min_segments: int
+    qwen_asr_model: str
+    qwen_asr_dtype: str
+    qwen_asr_attn_implementation: str
+    qwen_asr_max_new_tokens: int
+    qwen_asr_max_inference_batch_size: int
+    qwen_asr_warmup_on_start: bool
+    vibevoice_python: str
+    vibevoice_script: str
+    vibevoice_model: str
+    vibevoice_dtype: str
+    vibevoice_max_new_tokens: int
+    vibevoice_warmup_on_start: bool
     llm_base_url: str
     llm_model: str
     llm_temperature: float
     llm_max_tokens: int
+    llm_chronicle_min_words: int
+    llm_chronicle_max_words: int
     llm_warmup_on_start: bool
     summary_context_relevance_gate: bool
     summary_context_min_relevance: float
@@ -41,7 +41,6 @@ class Settings:
     lmstudio_control_timeout_seconds: float
     lmstudio_auto_load_wait_seconds: float
     processing_timeout_seconds: int
-    summary_chunk_chars: int
     recording_rotation_seconds: int
     recovery_auto_post_partial: bool
     recovery_max_sessions: int
@@ -59,6 +58,11 @@ class Settings:
     voice_decode_burst_window_seconds: int
     voice_decode_burst_threshold: int
     voice_decode_burst_cooldown_seconds: int
+    voice_sidecar_enabled: bool
+    voice_sidecar_base_url: str
+    voice_sidecar_token: str
+    voice_sidecar_timeout_seconds: float
+    live_chunk_transcribe_on_rotation: bool
     data_dir: Path
 
 
@@ -66,19 +70,6 @@ def _as_bool(value: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _normalize_whisper_path(api_style: str, path_value: str) -> str:
-    path = (path_value or "").strip()
-    if path and not path.startswith("/"):
-        path = f"/{path}"
-    if not path:
-        path = "/v1/audio/transcriptions" if api_style == "openai" else "/asr"
-    if api_style == "openai" and path == "/asr":
-        path = "/v1/audio/transcriptions"
-    if api_style == "asr" and path == "/v1/audio/transcriptions":
-        path = "/asr"
-    return path
 
 
 def _derive_lmstudio_control_base_url(llm_base_url: str) -> str:
@@ -95,8 +86,6 @@ def load_settings() -> Settings:
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN is required in environment.")
 
-    # Compose `models` can inject endpoint/model env vars.
-    # Prefer generic LLM_* names, then MODEL_RUNNER_* aliases.
     llm_base_url = os.getenv("LLM_BASE_URL", "").strip()
     llm_model = os.getenv("LLM_MODEL", "").strip()
     model_runner_base_url = os.getenv("MODEL_RUNNER_BASE_URL", "").strip()
@@ -105,6 +94,7 @@ def load_settings() -> Settings:
         llm_base_url or model_runner_base_url or "http://127.0.0.1:1234/v1"
     ).strip()
     resolved_llm_model = (llm_model or model_runner_name or "local-model").strip()
+
     lmstudio_control_base_url = os.getenv(
         "LMSTUDIO_CONTROL_BASE_URL", ""
     ).strip().rstrip("/") or _derive_lmstudio_control_base_url(resolved_llm_base_url)
@@ -113,89 +103,78 @@ def load_settings() -> Settings:
     ).strip()
     if not lmstudio_control_load_path.startswith("/"):
         lmstudio_control_load_path = f"/{lmstudio_control_load_path}"
+
     audio_mp3_vbr_quality = int(os.getenv("AUDIO_MP3_VBR_QUALITY", "4"))
     if audio_mp3_vbr_quality < 0:
         audio_mp3_vbr_quality = 0
     if audio_mp3_vbr_quality > 9:
         audio_mp3_vbr_quality = 9
 
-    whisper_api_style = os.getenv("WHISPER_API_STYLE", "asr").strip().lower()
-    if whisper_api_style not in {"asr", "openai"}:
-        whisper_api_style = "asr"
-    whisper_fallback_api_style = (
-        os.getenv("WHISPER_FALLBACK_API_STYLE", "").strip().lower()
-    )
-    if whisper_fallback_api_style and whisper_fallback_api_style not in {
-        "asr",
-        "openai",
-    }:
-        whisper_fallback_api_style = ""
+    llm_chronicle_min_words = max(80, int(os.getenv("LLM_CHRONICLE_MIN_WORDS", "180")))
+    llm_chronicle_max_words = max(120, int(os.getenv("LLM_CHRONICLE_MAX_WORDS", "320")))
+    if llm_chronicle_max_words < llm_chronicle_min_words:
+        llm_chronicle_max_words = llm_chronicle_min_words
 
-    whisper_asr_path = _normalize_whisper_path(
-        whisper_api_style, os.getenv("WHISPER_ASR_PATH", "")
-    )
-    fallback_style_resolved = whisper_fallback_api_style or whisper_api_style
-    fallback_path_default = os.getenv("WHISPER_FALLBACK_ASR_PATH", "")
-    whisper_fallback_asr_path = _normalize_whisper_path(
-        fallback_style_resolved, fallback_path_default
-    )
-    whisper_fallback_base_url = (
-        os.getenv("WHISPER_FALLBACK_BASE_URL", "").strip().rstrip("/")
-    )
-    whisper_fallback_enabled_default = bool(whisper_fallback_base_url)
-    whisper_fallback_enabled = _as_bool(
-        os.getenv(
-            "WHISPER_FALLBACK_ENABLED",
-            "true" if whisper_fallback_enabled_default else "false",
-        ),
-        default=whisper_fallback_enabled_default,
-    )
-    whisper_fallback_on_low_quality = _as_bool(
-        os.getenv("WHISPER_FALLBACK_ON_LOW_QUALITY", "false"),
-        default=False,
-    )
+    resolved_asr_language = (
+        os.getenv("ASR_LANGUAGE", "").strip() or os.getenv("WHISPER_LANGUAGE", "ru")
+    ).strip()
 
     return Settings(
+        asr_backend=os.getenv("ASR_BACKEND", "qwen3_asr").strip().lower(),
+        asr_language=resolved_asr_language,
+        asr_dtype=os.getenv("ASR_DTYPE", "float16").strip().lower(),
+        asr_max_new_tokens=max(128, int(os.getenv("ASR_MAX_NEW_TOKENS", "4096"))),
         discord_bot_token=token,
-        whisper_base_url=os.getenv("WHISPER_BASE_URL", "http://127.0.0.1:9000").rstrip(
-            "/"
+        qwen_asr_model=os.getenv("QWEN3_ASR_MODEL", "Qwen/Qwen3-ASR-1.7B").strip(),
+        qwen_asr_dtype=(
+            os.getenv("QWEN3_ASR_DTYPE", "").strip().lower()
+            or os.getenv("ASR_DTYPE", "float16").strip().lower()
         ),
-        whisper_api_style=whisper_api_style,
-        whisper_asr_path=whisper_asr_path,
-        whisper_openai_model=os.getenv(
-            "WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo"
+        qwen_asr_attn_implementation=os.getenv("QWEN3_ASR_ATTN_IMPLEMENTATION", "auto")
+        .strip()
+        .lower(),
+        qwen_asr_max_new_tokens=max(
+            128,
+            int(
+                (os.getenv("QWEN3_ASR_MAX_NEW_TOKENS", "").strip())
+                or os.getenv("ASR_MAX_NEW_TOKENS", "4096")
+            ),
+        ),
+        qwen_asr_max_inference_batch_size=max(
+            1, int(os.getenv("QWEN3_ASR_MAX_INFERENCE_BATCH_SIZE", "32"))
+        ),
+        qwen_asr_warmup_on_start=_as_bool(
+            os.getenv("QWEN3_ASR_WARMUP_ON_START", "false"), default=False
+        ),
+        vibevoice_python=os.getenv(
+            "VIBEVOICE_PYTHON", r".\.venv-vibe\Scripts\python.exe"
         ).strip(),
-        whisper_openai_temperature=float(
-            os.getenv("WHISPER_OPENAI_TEMPERATURE", "0.0")
+        vibevoice_script=os.getenv(
+            "VIBEVOICE_SCRIPT", "scripts/test_vibevoice_asr.py"
+        ).strip(),
+        vibevoice_model=os.getenv(
+            "VIBEVOICE_MODEL", "microsoft/VibeVoice-ASR-HF"
+        ).strip(),
+        vibevoice_dtype=(
+            os.getenv("VIBEVOICE_DTYPE", "").strip().lower()
+            or os.getenv("ASR_DTYPE", "float16").strip().lower()
         ),
-        whisper_openai_prompt=os.getenv("WHISPER_OPENAI_PROMPT", "").strip(),
-        whisper_language=os.getenv("WHISPER_LANGUAGE", "ru"),
-        whisper_task=os.getenv("WHISPER_TASK", "transcribe"),
-        whisper_encode=_as_bool(os.getenv("WHISPER_ENCODE", "true"), default=True),
-        whisper_warmup_on_start=_as_bool(
-            os.getenv("WHISPER_WARMUP_ON_START", "false"), default=False
+        vibevoice_max_new_tokens=max(
+            256,
+            int(
+                (os.getenv("VIBEVOICE_MAX_NEW_TOKENS", "").strip())
+                or os.getenv("ASR_MAX_NEW_TOKENS", "4096")
+            ),
         ),
-        whisper_fallback_enabled=whisper_fallback_enabled,
-        whisper_fallback_base_url=whisper_fallback_base_url,
-        whisper_fallback_api_style=fallback_style_resolved,
-        whisper_fallback_asr_path=whisper_fallback_asr_path,
-        whisper_fallback_openai_model=(
-            os.getenv("WHISPER_FALLBACK_OPENAI_MODEL", "").strip()
-            or os.getenv(
-                "WHISPER_OPENAI_MODEL", "openai/whisper-large-v3-turbo"
-            ).strip()
-        ),
-        whisper_fallback_on_low_quality=whisper_fallback_on_low_quality,
-        whisper_low_quality_min_chars=max(
-            0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_CHARS", "40"))
-        ),
-        whisper_low_quality_min_segments=max(
-            0, int(os.getenv("WHISPER_LOW_QUALITY_MIN_SEGMENTS", "1"))
+        vibevoice_warmup_on_start=_as_bool(
+            os.getenv("VIBEVOICE_WARMUP_ON_START", "false"), default=False
         ),
         llm_base_url=resolved_llm_base_url.rstrip("/"),
         llm_model=resolved_llm_model,
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1400")),
+        llm_chronicle_min_words=llm_chronicle_min_words,
+        llm_chronicle_max_words=llm_chronicle_max_words,
         llm_warmup_on_start=_as_bool(
             os.getenv("LLM_WARMUP_ON_START", "false"), default=False
         ),
@@ -217,7 +196,6 @@ def load_settings() -> Settings:
             0.0, float(os.getenv("LMSTUDIO_AUTO_LOAD_WAIT_SECONDS", "1.5"))
         ),
         processing_timeout_seconds=int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "7200")),
-        summary_chunk_chars=int(os.getenv("SUMMARY_CHUNK_CHARS", "14000")),
         recording_rotation_seconds=int(os.getenv("RECORDING_ROTATION_SECONDS", "1800")),
         recovery_auto_post_partial=_as_bool(
             os.getenv("RECOVERY_AUTO_POST_PARTIAL", "true"), default=True
@@ -255,45 +233,45 @@ def load_settings() -> Settings:
         voice_decode_burst_cooldown_seconds=max(
             5, int(os.getenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60"))
         ),
+        voice_sidecar_enabled=_as_bool(
+            os.getenv("VOICE_SIDECAR_ENABLED", "false"), default=False
+        ),
+        voice_sidecar_base_url=(
+            os.getenv("VOICE_SIDECAR_BASE_URL", "http://127.0.0.1:8081").strip()
+        ).rstrip("/"),
+        voice_sidecar_token=os.getenv("SIDECAR_TOKEN", "").strip(),
+        voice_sidecar_timeout_seconds=max(
+            1.0, float(os.getenv("VOICE_SIDECAR_TIMEOUT_SECONDS", "30"))
+        ),
+        live_chunk_transcribe_on_rotation=_as_bool(
+            os.getenv("LIVE_CHUNK_TRANSCRIBE_ON_ROTATION", "false"),
+            default=False,
+        ),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
 
 
 def config_doctor_issues(settings: Settings) -> list[str]:
     issues: list[str] = []
-    if settings.whisper_api_style == "asr" and settings.whisper_asr_path != "/asr":
+    if settings.asr_backend not in {"qwen3_asr", "vibevoice_asr"}:
+        issues.append("ASR_BACKEND must be one of: qwen3_asr, vibevoice_asr.")
+    if settings.qwen_asr_dtype not in {"auto", "bfloat16", "float16", "float32"}:
         issues.append(
-            f"WHISPER_API_STYLE=asr but WHISPER_ASR_PATH={settings.whisper_asr_path}. Expected /asr."
+            "QWEN3_ASR_DTYPE must be one of: auto, bfloat16, float16, float32."
         )
-    if (
-        settings.whisper_api_style == "openai"
-        and settings.whisper_asr_path != "/v1/audio/transcriptions"
-    ):
+    if settings.qwen_asr_attn_implementation not in {
+        "auto",
+        "eager",
+        "sdpa",
+        "flash_attention_2",
+    }:
         issues.append(
-            "WHISPER_API_STYLE=openai but WHISPER_ASR_PATH is not /v1/audio/transcriptions."
+            "QWEN3_ASR_ATTN_IMPLEMENTATION must be one of: auto, eager, sdpa, flash_attention_2."
         )
-    if settings.whisper_fallback_enabled and not settings.whisper_fallback_base_url:
-        issues.append(
-            "WHISPER_FALLBACK_ENABLED=true but WHISPER_FALLBACK_BASE_URL is empty."
-        )
-    if (
-        settings.whisper_fallback_on_low_quality
-        and not settings.whisper_fallback_enabled
-    ):
-        issues.append(
-            "WHISPER_FALLBACK_ON_LOW_QUALITY=true but WHISPER_FALLBACK_ENABLED=false."
-        )
-    if settings.whisper_fallback_enabled:
-        same_target = (
-            settings.whisper_base_url.rstrip("/")
-            == settings.whisper_fallback_base_url.rstrip("/")
-            and settings.whisper_api_style == settings.whisper_fallback_api_style
-            and settings.whisper_asr_path == settings.whisper_fallback_asr_path
-        )
-        if same_target:
-            issues.append(
-                "Whisper fallback target matches primary target; fallback has no effect."
-            )
+    if settings.asr_dtype not in {"auto", "bfloat16", "float16", "float32"}:
+        issues.append("ASR_DTYPE must be one of: auto, bfloat16, float16, float32.")
     if settings.lmstudio_auto_load and not settings.lmstudio_control_base_url:
         issues.append("LMSTUDIO_AUTO_LOAD=true but LMSTUDIO_CONTROL_BASE_URL is empty.")
+    if settings.voice_sidecar_enabled and not settings.voice_sidecar_base_url:
+        issues.append("VOICE_SIDECAR_ENABLED=true but VOICE_SIDECAR_BASE_URL is empty.")
     return issues

@@ -2,40 +2,36 @@
 
 ## Goals
 
-Choose a profile based on priority:
+Choose profile by priority:
 
-- max quality transcript
+- maximum transcript quality
 - fastest turnaround
-- balanced quality/speed
+- balanced mode for long sessions
 
-## ASR backend choices
+## Qwen3-ASR knobs
 
-### `whisper` (`asr` style)
-
-- usually more complete transcript in this project setup
-- good default for quality-sensitive sessions
-
-### `whisper_vllm` (`openai` style)
-
-- often faster after warm-up
-- quality may differ even with similar model names due to different serving stack
-
-## ASR quality knobs
-
-- `WHISPER_OPENAI_TEMPERATURE=0.0` for deterministic output
-- `WHISPER_OPENAI_PROMPT` with character/lore names
-- fallback on low quality:
-  - `WHISPER_FALLBACK_ON_LOW_QUALITY=true`
-  - tune `WHISPER_LOW_QUALITY_MIN_CHARS`
-  - tune `WHISPER_LOW_QUALITY_MIN_SEGMENTS`
+- `QWEN3_ASR_MODEL`:
+  - `Qwen/Qwen3-ASR-1.7B` is default baseline
+- `QWEN3_ASR_DTYPE`:
+  - `float16` is usually best stable GPU default on Windows/NVIDIA
+  - `bfloat16` can be tested if stack supports it well
+- `QWEN3_ASR_ATTN_IMPLEMENTATION`:
+  - `auto` default
+  - `sdpa` for predictable compatibility
+  - `flash_attention_2` for faster inference when FA2 is installed
+- `QWEN3_ASR_MAX_INFERENCE_BATCH_SIZE`:
+  - raise on high-VRAM GPUs for throughput
+  - lower if you see OOM or unstable latency
+- `QWEN3_ASR_MAX_NEW_TOKENS`:
+  - keep high enough to avoid transcript truncation
 
 ## Audio preprocessing knobs
 
-- `AUDIO_NORMALIZE=true` can help difficult speech
-- `AUDIO_VAD_ENABLED=true` can reduce silence/noise but may alter timing
-- `AUDIO_DUAL_PIPELINE_ENABLED=true` keeps better timeline while using processed text pass
+- `AUDIO_NORMALIZE=true` can improve hard/noisy speech
+- `AUDIO_VAD_ENABLED=true` trims long silence but may shift timing
+- `AUDIO_DUAL_PIPELINE_ENABLED=true` runs extra fallback ASR pass for robustness on difficult audio
 
-Speech-oriented compression profile example:
+Speech-oriented compression profile:
 
 - `AUDIO_TARGET_CHANNELS=1`
 - `AUDIO_TARGET_SAMPLE_RATE=16000`
@@ -43,16 +39,15 @@ Speech-oriented compression profile example:
 
 ## LLM summary speed/quality
 
-- `LLM_WARMUP_ON_START=true` avoids first-call latency spikes
-- lower `LLM_TEMPERATURE` for stable structured output
-- adjust `LLM_MAX_TOKENS` only as needed to avoid unnecessary generation cost
-- keep `SUMMARY_CHUNK_CHARS` tuned for long sessions
+- `LLM_WARMUP_ON_START=true` reduces first summary latency
+- lower `LLM_TEMPERATURE` for more stable structure
+- tune `LLM_MAX_TOKENS` for long sessions
 
 ## Operational checks
 
-- benchmark ASR:
-  - `python scripts/benchmark_whisper.py ...`
-- smoke e2e:
+- smoke test:
   - `python scripts/smoke_e2e.py`
-- watch counters:
+- one-file Qwen env benchmark:
+  - `python scripts/benchmark_qwen_envs.py --audio <path>`
+- runtime counters:
   - `/chronicle_status`

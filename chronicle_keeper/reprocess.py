@@ -6,9 +6,9 @@ import logging
 from pathlib import Path
 
 from .config import load_settings
+from .asr import create_asr_client
 from .llm_client import LLMClient
 from .processor import SessionProcessor
-from .whisper_client import WhisperClient
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,36 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["en", "uk", "ru"],
         help="Summary language (default: ru).",
     )
+    parser.add_argument(
+        "--audio-subdir",
+        type=str,
+        default="",
+        help=(
+            "Session audio subdirectory to process (e.g. 'audio' or 'audio_vad'). "
+            "If omitted, reprocess auto-selects based on settings."
+        ),
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help=(
+            "Skip ASR and regenerate only summary.md from existing transcripts "
+            "(transcripts/*.md or full_transcript.md)."
+        ),
+    )
+    parser.add_argument(
+        "--transcribe-only",
+        action="store_true",
+        help=(
+            "Run ASR only (incremental by default) and regenerate transcript files "
+            "without creating summary.md."
+        ),
+    )
+    parser.add_argument(
+        "--force-transcribe",
+        action="store_true",
+        help="Re-transcribe all chunks even if transcript files already exist.",
+    )
     return parser
 
 
@@ -60,11 +90,11 @@ async def _run() -> int:
     if not session_dir.exists() or not session_dir.is_dir():
         raise RuntimeError(f"Session directory not found: {session_dir}")
 
-    whisper = WhisperClient(settings)
+    asr_client = create_asr_client(settings)
     llm = LLMClient(settings)
     processor = SessionProcessor(
         settings.data_dir,
-        whisper,
+        asr_client,
         llm,
         audio_dual_pipeline_enabled=settings.audio_dual_pipeline_enabled,
         audio_normalize=settings.audio_normalize,
@@ -72,20 +102,45 @@ async def _run() -> int:
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
-        summary_chunk_chars=settings.summary_chunk_chars,
         summary_context_relevance_gate=settings.summary_context_relevance_gate,
         summary_context_min_relevance=settings.summary_context_min_relevance,
     )
 
     logger.info(
-        "[reprocess-cli] start session_dir=%s language=%s",
+        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s summary_only=%s transcribe_only=%s force_transcribe=%s",
         session_dir,
         args.language,
+        (args.audio_subdir or "<auto>"),
+        args.summary_only,
+        args.transcribe_only,
+        args.force_transcribe,
     )
-    artifacts = await processor.reprocess_saved_session(
-        session_dir=session_dir,
-        summary_language=args.language,
-    )
+    if args.summary_only and args.transcribe_only:
+        raise RuntimeError("Use only one mode: --summary-only OR --transcribe-only.")
+    if args.transcribe_only:
+        processed, total = await processor.transcribe_saved_session_incremental(
+            session_dir=session_dir,
+            audio_subdir=(args.audio_subdir or None),
+            force=bool(args.force_transcribe),
+        )
+        logger.info(
+            "[reprocess-cli] transcribe-only done session_dir=%s processed=%s total=%s",
+            session_dir,
+            processed,
+            total,
+        )
+        return 0
+    if args.summary_only:
+        artifacts = await processor.resummarize_saved_session(
+            session_dir=session_dir,
+            summary_language=args.language,
+        )
+    else:
+        artifacts = await processor.reprocess_saved_session(
+            session_dir=session_dir,
+            summary_language=args.language,
+            audio_subdir=(args.audio_subdir or None),
+        )
     logger.info(
         "[reprocess-cli] done session_dir=%s transcript=%s summary=%s",
         artifacts.session_dir,

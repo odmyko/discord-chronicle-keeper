@@ -14,9 +14,9 @@ from typing import NamedTuple
 
 import discord
 
+from .asr import ASRClient
 from .llm_client import LLMClient
 from .metrics import RuntimeMetrics
-from .whisper_client import WhisperClient, TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +33,6 @@ class SpeakerTranscript:
     speaker_name: str
     audio_path: Path
     transcript: str
-
-
-@dataclass
-class TimelineEntry:
-    segment_index: int
-    start_seconds: float
-    end_seconds: float
-    user_id: int
-    speaker_name: str
-    text: str
 
 
 @dataclass
@@ -95,7 +85,7 @@ class SessionProcessor:
     def __init__(
         self,
         base_data_dir: Path,
-        whisper: WhisperClient,
+        asr: ASRClient,
         llm: LLMClient,
         audio_dual_pipeline_enabled: bool = False,
         audio_normalize: bool = False,
@@ -103,13 +93,12 @@ class SessionProcessor:
         audio_target_sample_rate: int = 0,
         audio_target_channels: int = 0,
         audio_mp3_vbr_quality: int = 4,
-        summary_chunk_chars: int = 14000,
         summary_context_relevance_gate: bool = False,
         summary_context_min_relevance: float = 0.40,
         metrics: RuntimeMetrics | None = None,
     ) -> None:
         self._base_data_dir = base_data_dir
-        self._whisper = whisper
+        self._asr = asr
         self._llm = llm
         self._audio_dual_pipeline_enabled = audio_dual_pipeline_enabled
         self._audio_normalize = audio_normalize
@@ -117,7 +106,6 @@ class SessionProcessor:
         self._audio_target_sample_rate = max(0, audio_target_sample_rate)
         self._audio_target_channels = max(0, audio_target_channels)
         self._audio_mp3_vbr_quality = min(9, max(0, audio_mp3_vbr_quality))
-        self._summary_chunk_chars = max(4000, summary_chunk_chars)
         self._summary_context_relevance_gate = bool(summary_context_relevance_gate)
         self._summary_context_min_relevance = min(
             1.0, max(0.0, float(summary_context_min_relevance))
@@ -361,10 +349,8 @@ class SessionProcessor:
         audio_dir = session_dir / "audio"
         transcript_dir = session_dir / "transcripts"
         checkpoint_path = session_dir / "processing_state.json"
-        summary_chunks_dir = session_dir / "summary_chunks"
         audio_dir.mkdir(parents=True, exist_ok=True)
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        summary_chunks_dir.mkdir(parents=True, exist_ok=True)
 
         checkpoint = {
             "guild_id": guild.id,
@@ -388,7 +374,6 @@ class SessionProcessor:
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
             OrderedDict()
         )
-        timeline_entries: list[TimelineEntry] = []
         segment_audio_paths: dict[int, list[Path]] = {}
         segment_index = 0
 
@@ -419,22 +404,6 @@ class SessionProcessor:
                     user_id,
                     wav_path.name,
                 )
-                timeline_result = None
-                if self._audio_dual_pipeline_enabled:
-                    logger.debug(
-                        "[processor] transcribe timeline(raw) start speaker=%s file=%s",
-                        speaker_name,
-                        wav_path.name,
-                    )
-                    asr_started = time.perf_counter()
-                    try:
-                        timeline_result = await self._whisper.transcribe_file_detailed(
-                            wav_path
-                        )
-                    except Exception:
-                        self._observe_metric("asr_transcribe", asr_started, False)
-                        raise
-                    self._observe_metric("asr_transcribe", asr_started, True)
                 compress_started = time.perf_counter()
                 try:
                     compressed_path = await self._compress_audio(wav_path)
@@ -449,7 +418,7 @@ class SessionProcessor:
                 )
                 asr_started = time.perf_counter()
                 try:
-                    content_result = await self._whisper.transcribe_file_detailed(
+                    content_result = await self._asr.transcribe_file_detailed(
                         compressed_path
                     )
                 except Exception:
@@ -457,37 +426,19 @@ class SessionProcessor:
                     raise
                 self._observe_metric("asr_transcribe", asr_started, True)
                 transcript = self._clean_transcript_text(content_result.text)
-                if not transcript and timeline_result is not None:
-                    transcript = self._clean_transcript_text(timeline_result.text)
                 logger.debug(
                     "[processor] transcribe done speaker=%s chars=%s",
                     speaker_name,
                     len(transcript),
                 )
-                timeline_segments_raw = (
-                    timeline_result.segments
-                    if timeline_result is not None
-                    else content_result.segments
-                )
-                timeline_segments = [
-                    TranscriptSegment(
-                        start=seg.start,
-                        end=seg.end,
-                        text=cleaned_text,
-                    )
-                    for seg in timeline_segments_raw
-                    if (cleaned_text := self._clean_transcript_text(seg.text))
-                ]
-                if not transcript and timeline_segments:
-                    transcript = " ".join(seg.text for seg in timeline_segments).strip()
-                timeline_entries.extend(
-                    self._timeline_entries_from_segments(
-                        timeline_segments,
-                        segment_index=segment_index,
-                        user_id=int(user_id),
-                        speaker_name=speaker_name,
-                    )
-                )
+                if not transcript:
+                    cleaned_segments = [
+                        self._clean_transcript_text(seg.text)
+                        for seg in content_result.segments
+                    ]
+                    cleaned_segments = [seg for seg in cleaned_segments if seg]
+                    if cleaned_segments:
+                        transcript = " ".join(cleaned_segments).strip()
                 transcript_path = transcript_dir / f"{base_name}.md"
                 transcript_path.write_text(
                     transcript or "_[no speech detected]_", encoding="utf-8"
@@ -521,23 +472,11 @@ class SessionProcessor:
                 )
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
-        timeline_entries.sort(
-            key=lambda item: (
-                item.segment_index,
-                item.start_seconds,
-                item.end_seconds,
-                item.user_id,
-            )
-        )
-        full_transcript = self._build_transcript_markdown(
-            merged_items, timeline_entries
-        )
+        full_transcript = self._build_transcript_markdown(merged_items)
         (session_dir / "full_transcript.md").write_text(
             full_transcript, encoding="utf-8"
         )
-        full_transcript_txt = self._build_transcript_text(
-            merged_items, timeline_entries
-        )
+        full_transcript_txt = self._build_transcript_text(merged_items)
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
         checkpoint["status"] = "summarizing"
@@ -555,73 +494,30 @@ class SessionProcessor:
             checkpoint_path=checkpoint_path,
         )
 
-        chunks = self._split_transcript_for_summary(
-            full_transcript, self._summary_chunk_chars
+        summary_input = self._build_llm_input_from_transcript_files(
+            transcript_dir=transcript_dir,
+            fallback_full_transcript=full_transcript,
         )
-        checkpoint["summary_chunks_total"] = len(chunks)
+        checkpoint["summary_chunks_total"] = 1
+        checkpoint["summary_chunks_done"] = 0
         self._write_checkpoint(checkpoint_path, checkpoint)
-        logger.info(
-            "[processor] summarize start chars=%s chunks=%s",
-            len(full_transcript),
-            len(chunks),
-        )
+        logger.info("[processor] summarize start input_chars=%s", len(summary_input))
 
-        if len(chunks) <= 1:
-            llm_started = time.perf_counter()
-            try:
-                summary_markdown = await self._llm.generate_summary(
-                    full_transcript,
-                    language=summary_language,
-                    session_context=effective_session_context,
-                    name_hints=effective_name_hints,
-                )
-            except Exception:
-                self._observe_metric("llm_summarize", llm_started, False)
-                self._observe_metric("session_process", process_started, False)
-                raise
-            self._observe_metric("llm_summarize", llm_started, True)
-        else:
-            chunk_summaries: list[str] = []
-            for idx, chunk in enumerate(chunks, start=1):
-                chunk_summary_path = summary_chunks_dir / f"chunk_{idx:03d}.md"
-                if chunk_summary_path.exists():
-                    chunk_summary = chunk_summary_path.read_text(encoding="utf-8")
-                else:
-                    llm_started = time.perf_counter()
-                    try:
-                        chunk_summary = await self._llm.generate_chunk_summary(
-                            chunk,
-                            chunk_index=idx,
-                            total_chunks=len(chunks),
-                            language=summary_language,
-                            session_context=effective_session_context,
-                            name_hints=effective_name_hints,
-                        )
-                    except Exception:
-                        self._observe_metric("llm_summarize", llm_started, False)
-                        self._observe_metric("session_process", process_started, False)
-                        raise
-                    self._observe_metric("llm_summarize", llm_started, True)
-                    chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
-                chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
-                checkpoint["summary_chunks_done"] = idx
-                self._write_checkpoint(checkpoint_path, checkpoint)
-
-            combined = "\n\n".join(chunk_summaries)
-            (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            llm_started = time.perf_counter()
-            try:
-                summary_markdown = await self._llm.combine_chunk_summaries(
-                    combined,
-                    language=summary_language,
-                    session_context=effective_session_context,
-                    name_hints=effective_name_hints,
-                )
-            except Exception:
-                self._observe_metric("llm_summarize", llm_started, False)
-                self._observe_metric("session_process", process_started, False)
-                raise
-            self._observe_metric("llm_summarize", llm_started, True)
+        llm_started = time.perf_counter()
+        try:
+            summary_markdown = await self._llm.generate_summary(
+                summary_input,
+                language=summary_language,
+                session_context=effective_session_context,
+                name_hints=effective_name_hints,
+            )
+        except Exception:
+            self._observe_metric("llm_summarize", llm_started, False)
+            self._observe_metric("session_process", process_started, False)
+            raise
+        self._observe_metric("llm_summarize", llm_started, True)
+        checkpoint["summary_chunks_done"] = 1
+        self._write_checkpoint(checkpoint_path, checkpoint)
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
@@ -659,18 +555,20 @@ class SessionProcessor:
         name_hints: str = "",
         campaign_id: str = "",
         campaign_name: str = "",
+        audio_subdir: str | None = None,
     ) -> SessionArtifacts:
         reprocess_started = time.perf_counter()
-        audio_dir = session_dir / "audio"
+        audio_dir, selected_audio_subdir = self._resolve_audio_dir_for_reprocess(
+            session_dir=session_dir,
+            audio_subdir=audio_subdir,
+        )
         transcript_dir = session_dir / "transcripts"
-        summary_chunks_dir = session_dir / "summary_chunks"
         checkpoint_path = session_dir / "processing_state.json"
         if not audio_dir.exists() or not audio_dir.is_dir():
             self._observe_metric("session_reprocess", reprocess_started, False)
             raise RuntimeError(f"Session audio directory not found: {audio_dir}")
 
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        summary_chunks_dir.mkdir(parents=True, exist_ok=True)
 
         entries = self._collect_saved_audio_entries(audio_dir)
         if not entries:
@@ -690,21 +588,22 @@ class SessionProcessor:
                 "segments_total": len(entries),
                 "persisted_segments": len(entries),
                 "total_tracks": len(entries),
+                "audio_source_subdir": selected_audio_subdir,
             }
         )
         self._write_checkpoint(checkpoint_path, checkpoint)
 
         logger.info(
-            "[reprocess] start session_dir=%s tracks=%s",
+            "[reprocess] start session_dir=%s tracks=%s audio_subdir=%s",
             session_dir,
             len(entries),
+            selected_audio_subdir,
         )
 
         speaker_items: list[SpeakerTranscript] = []
         speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
             OrderedDict()
         )
-        timeline_entries: list[TimelineEntry] = []
         segment_audio_paths: dict[int, list[Path]] = {}
         for entry in entries:
             logger.debug(
@@ -715,9 +614,7 @@ class SessionProcessor:
             )
             asr_started = time.perf_counter()
             try:
-                transcript_result = await self._whisper.transcribe_file_detailed(
-                    entry.path
-                )
+                transcript_result = await self._asr.transcribe_file_detailed(entry.path)
             except Exception:
                 self._observe_metric("asr_transcribe", asr_started, False)
                 self._observe_metric("session_reprocess", reprocess_started, False)
@@ -730,25 +627,14 @@ class SessionProcessor:
                 entry.user_id,
                 len(transcript),
             )
-            cleaned_segments = [
-                TranscriptSegment(
-                    start=seg.start,
-                    end=seg.end,
-                    text=cleaned_text,
-                )
-                for seg in transcript_result.segments
-                if (cleaned_text := self._clean_transcript_text(seg.text))
-            ]
-            if not transcript and cleaned_segments:
-                transcript = " ".join(seg.text for seg in cleaned_segments).strip()
-            timeline_entries.extend(
-                self._timeline_entries_from_segments(
-                    cleaned_segments,
-                    segment_index=entry.segment_index,
-                    user_id=entry.user_id,
-                    speaker_name=entry.speaker_name,
-                )
-            )
+            if not transcript:
+                cleaned_segments = [
+                    self._clean_transcript_text(seg.text)
+                    for seg in transcript_result.segments
+                ]
+                cleaned_segments = [seg for seg in cleaned_segments if seg]
+                if cleaned_segments:
+                    transcript = " ".join(cleaned_segments).strip()
             transcript_path = transcript_dir / f"{entry.path.stem}.md"
             transcript_path.write_text(
                 transcript or "_[no speech detected]_", encoding="utf-8"
@@ -778,23 +664,11 @@ class SessionProcessor:
                 )
             )
         merged_items.sort(key=lambda item: item.speaker_name.lower())
-        timeline_entries.sort(
-            key=lambda item: (
-                item.segment_index,
-                item.start_seconds,
-                item.end_seconds,
-                item.user_id,
-            )
-        )
-        full_transcript = self._build_transcript_markdown(
-            merged_items, timeline_entries
-        )
+        full_transcript = self._build_transcript_markdown(merged_items)
         (session_dir / "full_transcript.md").write_text(
             full_transcript, encoding="utf-8"
         )
-        full_transcript_txt = self._build_transcript_text(
-            merged_items, timeline_entries
-        )
+        full_transcript_txt = self._build_transcript_text(merged_items)
         full_transcript_txt_path = session_dir / "full_transcript.txt"
         full_transcript_txt_path.write_text(full_transcript_txt, encoding="utf-8")
 
@@ -810,65 +684,29 @@ class SessionProcessor:
             checkpoint_path=checkpoint_path,
         )
 
-        chunks = self._split_transcript_for_summary(
-            full_transcript, self._summary_chunk_chars
-        )
         checkpoint["status"] = "summarizing"
-        checkpoint["summary_chunks_total"] = len(chunks)
+        checkpoint["summary_chunks_total"] = 1
+        checkpoint["summary_chunks_done"] = 0
         self._write_checkpoint(checkpoint_path, checkpoint)
-        if len(chunks) <= 1:
-            llm_started = time.perf_counter()
-            try:
-                summary_markdown = await self._llm.generate_summary(
-                    full_transcript,
-                    language=summary_language,
-                    session_context=effective_session_context,
-                    name_hints=effective_name_hints,
-                )
-            except Exception:
-                self._observe_metric("llm_summarize", llm_started, False)
-                self._observe_metric("session_reprocess", reprocess_started, False)
-                raise
-            self._observe_metric("llm_summarize", llm_started, True)
-        else:
-            chunk_summaries: list[str] = []
-            for idx, chunk in enumerate(chunks, start=1):
-                chunk_summary_path = summary_chunks_dir / f"chunk_{idx:03d}.md"
-                llm_started = time.perf_counter()
-                try:
-                    chunk_summary = await self._llm.generate_chunk_summary(
-                        chunk,
-                        chunk_index=idx,
-                        total_chunks=len(chunks),
-                        language=summary_language,
-                        session_context=effective_session_context,
-                        name_hints=effective_name_hints,
-                    )
-                except Exception:
-                    self._observe_metric("llm_summarize", llm_started, False)
-                    self._observe_metric("session_reprocess", reprocess_started, False)
-                    raise
-                self._observe_metric("llm_summarize", llm_started, True)
-                chunk_summary_path.write_text(chunk_summary, encoding="utf-8")
-                chunk_summaries.append(f"## Chunk {idx}\n{chunk_summary}")
-                checkpoint["summary_chunks_done"] = idx
-                self._write_checkpoint(checkpoint_path, checkpoint)
-
-            combined = "\n\n".join(chunk_summaries)
-            (session_dir / "chunk_summaries.md").write_text(combined, encoding="utf-8")
-            llm_started = time.perf_counter()
-            try:
-                summary_markdown = await self._llm.combine_chunk_summaries(
-                    combined,
-                    language=summary_language,
-                    session_context=effective_session_context,
-                    name_hints=effective_name_hints,
-                )
-            except Exception:
-                self._observe_metric("llm_summarize", llm_started, False)
-                self._observe_metric("session_reprocess", reprocess_started, False)
-                raise
-            self._observe_metric("llm_summarize", llm_started, True)
+        summary_input = self._build_llm_input_from_transcript_files(
+            transcript_dir=transcript_dir,
+            fallback_full_transcript=full_transcript,
+        )
+        llm_started = time.perf_counter()
+        try:
+            summary_markdown = await self._llm.generate_summary(
+                summary_input,
+                language=summary_language,
+                session_context=effective_session_context,
+                name_hints=effective_name_hints,
+            )
+        except Exception:
+            self._observe_metric("llm_summarize", llm_started, False)
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise
+        self._observe_metric("llm_summarize", llm_started, True)
+        checkpoint["summary_chunks_done"] = 1
+        self._write_checkpoint(checkpoint_path, checkpoint)
 
         summary_path = session_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
@@ -898,6 +736,236 @@ class SessionProcessor:
             summary_markdown=summary_markdown,
             summary_path=summary_path,
             speaker_transcripts=speaker_items,
+            mixed_audio_path=mixed_audio_path,
+        )
+
+    def _resolve_audio_dir_for_reprocess(
+        self, *, session_dir: Path, audio_subdir: str | None
+    ) -> tuple[Path, str]:
+        selected_audio_subdir = (audio_subdir or "").strip()
+        if selected_audio_subdir:
+            audio_dir = session_dir / selected_audio_subdir
+        else:
+            preferred_vad_dir = session_dir / "audio_vad"
+            if self._audio_vad_enabled and preferred_vad_dir.exists():
+                audio_dir = preferred_vad_dir
+                selected_audio_subdir = "audio_vad"
+            else:
+                audio_dir = session_dir / "audio"
+                selected_audio_subdir = "audio"
+        return audio_dir, selected_audio_subdir
+
+    async def transcribe_saved_session_incremental(
+        self,
+        *,
+        session_dir: Path,
+        audio_subdir: str | None = None,
+        force: bool = False,
+    ) -> tuple[int, int]:
+        audio_dir, selected_audio_subdir = self._resolve_audio_dir_for_reprocess(
+            session_dir=session_dir,
+            audio_subdir=audio_subdir,
+        )
+        transcript_dir = session_dir / "transcripts"
+        if not audio_dir.exists() or not audio_dir.is_dir():
+            raise RuntimeError(f"Session audio directory not found: {audio_dir}")
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        entries = self._collect_saved_audio_entries(audio_dir)
+        if not entries:
+            raise RuntimeError(f"No supported audio files found in {audio_dir}")
+
+        processed = 0
+        total = len(entries)
+        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
+            OrderedDict()
+        )
+        for entry in entries:
+            transcript_path = transcript_dir / f"{entry.path.stem}.md"
+            transcript = ""
+            if transcript_path.exists() and not force:
+                transcript = transcript_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ).strip()
+            else:
+                asr_started = time.perf_counter()
+                transcript_result = await self._asr.transcribe_file_detailed(entry.path)
+                self._observe_metric("asr_transcribe", asr_started, True)
+                transcript = self._clean_transcript_text(transcript_result.text)
+                if not transcript:
+                    cleaned_segments = [
+                        self._clean_transcript_text(seg.text)
+                        for seg in transcript_result.segments
+                    ]
+                    cleaned_segments = [seg for seg in cleaned_segments if seg]
+                    if cleaned_segments:
+                        transcript = " ".join(cleaned_segments).strip()
+                transcript_path.write_text(
+                    transcript or "_[no speech detected]_", encoding="utf-8"
+                )
+                processed += 1
+            key = (entry.user_id, entry.speaker_name)
+            speaker_transcript_chunks.setdefault(key, []).append(
+                transcript or "_[no speech detected]_"
+            )
+
+        merged_items: list[SpeakerTranscript] = []
+        for (user_id, speaker_name), chunks in speaker_transcript_chunks.items():
+            merged_items.append(
+                SpeakerTranscript(
+                    user_id=user_id,
+                    speaker_name=speaker_name,
+                    audio_path=Path(""),
+                    transcript="\n\n".join(chunks).strip(),
+                )
+            )
+        merged_items.sort(key=lambda item: item.speaker_name.lower())
+        full_transcript = self._build_transcript_markdown(merged_items)
+        (session_dir / "full_transcript.md").write_text(
+            full_transcript, encoding="utf-8"
+        )
+        full_transcript_txt = self._build_transcript_text(merged_items)
+        (session_dir / "full_transcript.txt").write_text(
+            full_transcript_txt, encoding="utf-8"
+        )
+        checkpoint_path = session_dir / "processing_state.json"
+        checkpoint: dict = {}
+        if checkpoint_path.exists():
+            try:
+                loaded = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    checkpoint = loaded
+            except Exception:
+                checkpoint = {}
+        checkpoint.update(
+            {
+                "status": "transcribing"
+                if processed > 0
+                else checkpoint.get("status", ""),
+                "segments_total": total,
+                "persisted_segments": total,
+                "total_tracks": total,
+                "audio_source_subdir": selected_audio_subdir,
+            }
+        )
+        self._write_checkpoint(checkpoint_path, checkpoint)
+        logger.info(
+            "[reprocess] incremental_transcribe session_dir=%s processed=%s total=%s audio_subdir=%s",
+            session_dir,
+            processed,
+            total,
+            selected_audio_subdir,
+        )
+        return processed, total
+
+    async def resummarize_saved_session(
+        self,
+        session_dir: Path,
+        summary_language: str = "ru",
+        session_context: str = "",
+        name_hints: str = "",
+    ) -> SessionArtifacts:
+        reprocess_started = time.perf_counter()
+        transcript_dir = session_dir / "transcripts"
+        checkpoint_path = session_dir / "processing_state.json"
+        full_transcript_md_path = session_dir / "full_transcript.md"
+        full_transcript_txt_path = session_dir / "full_transcript.txt"
+
+        if not session_dir.exists() or not session_dir.is_dir():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(f"Session directory not found: {session_dir}")
+        if not transcript_dir.exists() and not full_transcript_md_path.exists():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(
+                f"No transcripts found in {session_dir} (expected transcripts/ or full_transcript.md)."
+            )
+
+        checkpoint: dict = {}
+        if checkpoint_path.exists():
+            try:
+                loaded = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    checkpoint = loaded
+            except Exception:
+                checkpoint = {}
+        checkpoint["status"] = "summarizing"
+        checkpoint["summary_chunks_total"] = 1
+        checkpoint["summary_chunks_done"] = 0
+        self._write_checkpoint(checkpoint_path, checkpoint)
+
+        full_transcript = ""
+        if full_transcript_md_path.exists():
+            full_transcript = full_transcript_md_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip()
+        elif full_transcript_txt_path.exists():
+            full_transcript = full_transcript_txt_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip()
+
+        summary_input = self._build_llm_input_from_transcript_files(
+            transcript_dir=transcript_dir,
+            fallback_full_transcript=full_transcript,
+        )
+        if not summary_input.strip():
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise RuntimeError(f"No transcript content found in {session_dir}.")
+        if not full_transcript:
+            full_transcript = summary_input
+
+        (
+            effective_session_context,
+            effective_name_hints,
+        ) = await self._resolve_effective_summary_context(
+            full_transcript=full_transcript,
+            summary_language=summary_language,
+            session_context=session_context,
+            name_hints=name_hints,
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+        )
+
+        llm_started = time.perf_counter()
+        try:
+            summary_markdown = await self._llm.generate_summary(
+                summary_input,
+                language=summary_language,
+                session_context=effective_session_context,
+                name_hints=effective_name_hints,
+            )
+        except Exception:
+            self._observe_metric("llm_summarize", llm_started, False)
+            self._observe_metric("session_reprocess", reprocess_started, False)
+            raise
+        self._observe_metric("llm_summarize", llm_started, True)
+
+        summary_path = session_dir / "summary.md"
+        summary_path.write_text(summary_markdown, encoding="utf-8")
+        if not full_transcript_txt_path.exists():
+            full_transcript_txt_path.write_text(full_transcript, encoding="utf-8")
+
+        mixed_audio_path: Path | None = None
+        for candidate in (
+            session_dir / "audio" / "mixed_session.mp3",
+            session_dir / "audio_vad" / "mixed_session.mp3",
+        ):
+            if candidate.exists():
+                mixed_audio_path = candidate
+                break
+
+        checkpoint["summary_language_used"] = summary_language
+        checkpoint["summary_chunks_done"] = 1
+        checkpoint["final_summary_done"] = True
+        checkpoint["status"] = "done"
+        self._write_checkpoint(checkpoint_path, checkpoint)
+        self._observe_metric("session_reprocess", reprocess_started, True)
+
+        return SessionArtifacts(
+            session_dir=session_dir,
+            full_transcript=full_transcript,
+            full_transcript_txt_path=full_transcript_txt_path,
+            summary_markdown=summary_markdown,
+            summary_path=summary_path,
+            speaker_transcripts=[],
             mixed_audio_path=mixed_audio_path,
         )
 
@@ -1044,8 +1112,15 @@ class SessionProcessor:
             return None
 
         concat_file = temp_dir / "concat.txt"
+
+        def _concat_line(path: Path) -> str:
+            # Concat demuxer paths are resolved relative to concat file location.
+            # Use absolute normalized path to avoid accidental double-prefix resolution.
+            normalized = path.resolve().as_posix().replace("'", "'\\''")
+            return f"file '{normalized}'"
+
         concat_file.write_text(
-            "\n".join(f"file '{p.as_posix()}'" for p in segment_mix_paths),
+            "\n".join(_concat_line(p) for p in segment_mix_paths),
             encoding="utf-8",
         )
         try:
@@ -1073,8 +1148,31 @@ class SessionProcessor:
         if code == 0 and mixed_output.exists():
             logger.info("[processor] built mixed session audio: %s", mixed_output.name)
             return mixed_output
+        # Retry once with captured stderr for actionable diagnostics.
+        proc_retry = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            str(self._audio_mp3_vbr_quality),
+            str(mixed_output),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc_retry.communicate()
+        retry_code = proc_retry.returncode
         logger.warning(
-            "[processor] failed to build mixed session audio (code=%s)", code
+            "[processor] failed to build mixed session audio (code=%s retry_code=%s): %s",
+            code,
+            retry_code,
+            (stderr.decode("utf-8", errors="ignore").strip()[:600] if stderr else ""),
         )
         return None
 
@@ -1122,103 +1220,12 @@ class SessionProcessor:
             return False
         return (await proc.wait()) == 0 and output_path.exists()
 
-    @staticmethod
-    def _split_transcript_for_summary(text: str, max_chars: int) -> list[str]:
-        if len(text) <= max_chars:
-            return [text]
-
-        chunks: list[str] = []
-        current: list[str] = []
-        size = 0
-        # Preserve speaker section boundaries where possible.
-        for line in text.splitlines(keepends=True):
-            line_len = len(line)
-            if size + line_len > max_chars and current:
-                chunks.append("".join(current))
-                current = [line]
-                size = line_len
-            else:
-                current.append(line)
-                size += line_len
-        if current:
-            chunks.append("".join(current))
-        return chunks
-
-    @classmethod
-    def _timeline_entries_from_segments(
-        cls,
-        segments: list[TranscriptSegment],
-        *,
-        segment_index: int,
-        user_id: int,
-        speaker_name: str,
-    ) -> list[TimelineEntry]:
-        if not segments:
-            return []
-
-        normalized_texts = [
-            re.sub(r"\s+", " ", seg.text.strip().lower()) for seg in segments
-        ]
-        keep_texts = cls._collapse_consecutive_repeats(
-            normalized_texts, min_run_length=3
-        )
-        entries: list[TimelineEntry] = []
-        kept_index = 0
-        run_count = 0
-        for idx, seg in enumerate(segments):
-            if not seg.text.strip():
-                continue
-            norm = normalized_texts[idx]
-            if idx > 0 and norm == normalized_texts[idx - 1]:
-                run_count += 1
-            else:
-                run_count = 1
-            next_same = idx + 1 < len(segments) and normalized_texts[idx + 1] == norm
-            if run_count >= 3 and next_same:
-                continue
-            if kept_index < len(keep_texts) and norm != keep_texts[kept_index]:
-                continue
-            if kept_index < len(keep_texts):
-                kept_index += 1
-            entries.append(
-                TimelineEntry(
-                    segment_index=max(0, segment_index),
-                    start_seconds=max(0.0, seg.start),
-                    end_seconds=max(0.0, seg.end),
-                    user_id=user_id,
-                    speaker_name=speaker_name,
-                    text=seg.text.strip(),
-                )
-            )
-        return entries
-
-    @staticmethod
-    def _format_ts(seconds: float) -> str:
-        total_ms = max(0, int(seconds * 1000))
-        minutes, remainder_ms = divmod(total_ms, 60_000)
-        secs, ms = divmod(remainder_ms, 1000)
-        return f"{minutes:02d}:{secs:02d}.{ms:03d}"
-
     @classmethod
     def _build_transcript_markdown(
         cls,
         items: list[SpeakerTranscript],
-        timeline: list[TimelineEntry],
     ) -> str:
         lines = ["# Full Transcript", ""]
-        lines.append("## Chronological Timeline (Approximate)")
-        if timeline:
-            for item in timeline:
-                lines.append(
-                    (
-                        f"- [seg{item.segment_index:03d} "
-                        f"{cls._format_ts(item.start_seconds)}-{cls._format_ts(item.end_seconds)}] "
-                        f"**{item.speaker_name}** (`{item.user_id}`): {item.text}"
-                    )
-                )
-        else:
-            lines.append("_No timed segments available from Whisper for this session._")
-        lines.append("")
         lines.append("## Speaker Buckets")
         lines.append("")
         for speaker_item in items:
@@ -1231,22 +1238,8 @@ class SessionProcessor:
     def _build_transcript_text(
         cls,
         items: list[SpeakerTranscript],
-        timeline: list[TimelineEntry],
     ) -> str:
         lines = ["Full Transcript", ""]
-        lines.append("Chronological Timeline (Approximate)")
-        if timeline:
-            for item in timeline:
-                lines.append(
-                    (
-                        f"[seg{item.segment_index:03d} "
-                        f"{cls._format_ts(item.start_seconds)}-{cls._format_ts(item.end_seconds)}] "
-                        f"{item.speaker_name} ({item.user_id}): {item.text}"
-                    )
-                )
-        else:
-            lines.append("No timed segments available from Whisper for this session.")
-        lines.append("")
         lines.append("Speaker Buckets")
         lines.append("")
         for speaker_item in items:
@@ -1254,3 +1247,20 @@ class SessionProcessor:
             lines.append(speaker_item.transcript or "[no speech detected]")
             lines.append("")
         return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _build_llm_input_from_transcript_files(
+        *,
+        transcript_dir: Path,
+        fallback_full_transcript: str,
+    ) -> str:
+        files = sorted(transcript_dir.glob("*.md"))
+        if not files:
+            return fallback_full_transcript
+        parts: list[str] = []
+        for idx, file_path in enumerate(files, start=1):
+            body = file_path.read_text(encoding="utf-8", errors="ignore").strip()
+            if not body:
+                body = "_[no speech detected]_"
+            parts.append(f"## Chunk {idx}: {file_path.stem}\n{body}")
+        return "\n\n".join(parts).strip()

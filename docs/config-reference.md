@@ -1,38 +1,36 @@
 # Config Reference
 
-This project is configured through `.env`.
+This project is configured via `.env`.
 
 ## Core
 
 - `DISCORD_BOT_TOKEN`: Discord bot token (required)
 - `DATA_DIR`: artifacts root (default `./data`)
 
-## Whisper (Primary)
+## ASR backend selection
 
-- `BOT_WHISPER_BASE_URL`: bot-side ASR base URL in compose network
-- `WHISPER_API_STYLE`: `asr` or `openai`
-- `WHISPER_ASR_PATH`: endpoint path (`/asr` or `/v1/audio/transcriptions`)
-- `WHISPER_LANGUAGE`: language hint (`ru`, `uk`, `en`, etc.)
-- `WHISPER_TASK`: `transcribe`
-- `WHISPER_ENCODE`: `true|false`
-- `WHISPER_OPENAI_MODEL`: model id for openai-style endpoint
-- `WHISPER_OPENAI_TEMPERATURE`: decoding temperature
-- `WHISPER_OPENAI_PROMPT`: optional names/lore hint
-- `WHISPER_WARMUP_ON_START`: pre-warm ASR at bot startup
+- `ASR_BACKEND`: `qwen3_asr` (default) or `vibevoice_asr`
+- `ASR_LANGUAGE`: language hint (`ru|uk|en` or full language name)
+- `ASR_DTYPE`: `auto|bfloat16|float16|float32` (shared default)
+- `ASR_MAX_NEW_TOKENS`: shared default output cap
 
-## Whisper Fallback
+## Qwen3-ASR options
 
-- `WHISPER_FALLBACK_ENABLED`: enable secondary ASR endpoint retry
-- `WHISPER_FALLBACK_BASE_URL`: fallback ASR base URL
-- `WHISPER_FALLBACK_API_STYLE`: fallback style (`asr|openai`)
-- `WHISPER_FALLBACK_ASR_PATH`: fallback endpoint path
-- `WHISPER_FALLBACK_OPENAI_MODEL`: fallback model for openai style
+- `QWEN3_ASR_MODEL`: model id (default `Qwen/Qwen3-ASR-1.7B`)
+- `QWEN3_ASR_DTYPE`: optional override (fallback: `ASR_DTYPE`)
+- `QWEN3_ASR_ATTN_IMPLEMENTATION`: `auto|eager|sdpa|flash_attention_2`
+- `QWEN3_ASR_MAX_NEW_TOKENS`: optional override (fallback: `ASR_MAX_NEW_TOKENS`)
+- `QWEN3_ASR_MAX_INFERENCE_BATCH_SIZE`: inference batch sizing
+- `QWEN3_ASR_WARMUP_ON_START`: warm ASR model on startup
 
-Quality-gate fallback:
+## VibeVoice-ASR options
 
-- `WHISPER_FALLBACK_ON_LOW_QUALITY`: retry on weak primary transcript
-- `WHISPER_LOW_QUALITY_MIN_CHARS`: minimum text chars threshold
-- `WHISPER_LOW_QUALITY_MIN_SEGMENTS`: minimum segments threshold
+- `VIBEVOICE_PYTHON`: Python interpreter path for separate env (default `.\\.venv-vibe\\Scripts\\python.exe`)
+- `VIBEVOICE_SCRIPT`: runner script path (default `scripts/test_vibevoice_asr.py`)
+- `VIBEVOICE_MODEL`: model id (default `microsoft/VibeVoice-ASR-HF`)
+- `VIBEVOICE_DTYPE`: optional override (fallback: `ASR_DTYPE`)
+- `VIBEVOICE_MAX_NEW_TOKENS`: optional override (fallback: `ASR_MAX_NEW_TOKENS`)
+- `VIBEVOICE_WARMUP_ON_START`: run startup warmup
 
 ## LLM
 
@@ -40,14 +38,44 @@ Quality-gate fallback:
 - `LLM_MODEL`: model id
 - `LLM_TEMPERATURE`
 - `LLM_MAX_TOKENS`
+- `LLM_CHRONICLE_MIN_WORDS`: lower target for Player-Facing Chronicle Post length
+- `LLM_CHRONICLE_MAX_WORDS`: upper target for Player-Facing Chronicle Post length
 - `LLM_WARMUP_ON_START`
-- `LMSTUDIO_AUTO_LOAD`: attempt LM Studio model load on "No models loaded"
-- `LMSTUDIO_CONTROL_BASE_URL`: optional explicit control API base URL
-- `LMSTUDIO_CONTROL_LOAD_PATH`: model load path (default `/api/v1/models/load`)
-- `LMSTUDIO_CONTROL_TIMEOUT_SECONDS`: timeout for control load request
-- `LMSTUDIO_AUTO_LOAD_WAIT_SECONDS`: wait before retry after load request
 
-## Audio Processing
+### LM Studio auto-load (optional)
+
+- `LMSTUDIO_AUTO_LOAD`
+- `LMSTUDIO_CONTROL_BASE_URL`
+- `LMSTUDIO_CONTROL_LOAD_PATH`
+- `LMSTUDIO_CONTROL_TIMEOUT_SECONDS`
+- `LMSTUDIO_AUTO_LOAD_WAIT_SECONDS`
+
+## Summary and processing
+
+- `PROCESSING_TIMEOUT_SECONDS`
+- `SUMMARY_CONTEXT_RELEVANCE_GATE`
+- `SUMMARY_CONTEXT_MIN_RELEVANCE`
+
+## Recording and reliability
+
+- `RECORDING_ROTATION_SECONDS`
+- `VOICE_PATCH_MODE`
+- `RECOVERY_AUTO_POST_PARTIAL`
+- `RECOVERY_MAX_SESSIONS`
+- `VOICE_DECODE_BURST_WINDOW_SECONDS`
+- `VOICE_DECODE_BURST_THRESHOLD`
+- `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
+
+## Voice sidecar (optional)
+
+- `VOICE_SIDECAR_ENABLED`: if `true`, `/chronicle_start` and `/chronicle_stop` use sidecar API instead of Python voice receive
+- `VOICE_SIDECAR_BASE_URL`: sidecar base URL (default `http://127.0.0.1:8081`)
+- `VOICE_SIDECAR_TIMEOUT_SECONDS`: sidecar request timeout
+- `SIDECAR_TOKEN`: optional auth token sent as `X-Sidecar-Token`
+- `SIDECAR_DAVE_ENCRYPTION`: enable DAVE/encryption mode in sidecar runtime
+- `SIDECAR_DECRYPTION_FAILURE_TOLERANCE`: tolerated decrypt errors before stream reset
+
+## Audio processing
 
 - `AUDIO_DUAL_PIPELINE_ENABLED`
 - `AUDIO_NORMALIZE`
@@ -56,38 +84,14 @@ Quality-gate fallback:
 - `AUDIO_TARGET_SAMPLE_RATE`
 - `AUDIO_MP3_VBR_QUALITY`
 - `PUBLISH_PER_SPEAKER_AUDIO`
-- Recommended long-session speech preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`
 
-## Session/Operations
-
-- `PROCESSING_TIMEOUT_SECONDS`
-- `SUMMARY_CHUNK_CHARS`
-- `SUMMARY_CONTEXT_RELEVANCE_GATE`
-- `SUMMARY_CONTEXT_MIN_RELEVANCE`
-- `RECORDING_ROTATION_SECONDS`
-- `RECOVERY_AUTO_POST_PARTIAL`
-- `RECOVERY_MAX_SESSIONS`
-- `VOICE_DECODE_BURST_WINDOW_SECONDS`
-- `VOICE_DECODE_BURST_THRESHOLD`
-- `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
-
-## Retention/Safety
+## Retention and safety
 
 - `AUTO_CLEANUP_ENABLED`
 - `AUTO_CLEANUP_ON_START`
 - `RETENTION_DAYS`
 - `ALLOW_PURGE_COMMANDS`
 
-## Backend Presets
+## Legacy compatibility
 
-### Classic `/asr`
-
-- `BOT_WHISPER_BASE_URL=http://whisper:9000`
-- `WHISPER_API_STYLE=asr`
-- `WHISPER_ASR_PATH=/asr`
-
-### vLLM OpenAI
-
-- `BOT_WHISPER_BASE_URL=http://whisper_vllm:8000`
-- `WHISPER_API_STYLE=openai`
-- `WHISPER_ASR_PATH=/v1/audio/transcriptions`
+`WHISPER_LANGUAGE` is still accepted as fallback for `ASR_LANGUAGE`.

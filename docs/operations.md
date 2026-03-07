@@ -2,58 +2,49 @@
 
 ## Choose Runtime Mode
 
-Pick one LLM mode first:
+LLM mode only (ASR is always local Qwen3-ASR in current build):
 
-1. `bot` + LM Studio (default service)
+1. `bot` + LM Studio/external OpenAI-compatible endpoint (default)
 2. `bot_docker_llm` + Docker model runner (`docker-llm` profile)
-
-Then pick one ASR backend:
-
-1. Classic Whisper `/asr` (`asr` profile, service `whisper`)
-2. vLLM OpenAI transcription (`vllm` profile, service `whisper_vllm`)
+3. Optional `bot_sidecar` + `voice_sidecar` (`voice-sidecar` profile)
 
 ## Start
 
-LM Studio + classic ASR:
+LM Studio / external LLM endpoint:
 
 ```bash
-docker compose --profile asr up -d --build --remove-orphans
+docker compose up -d --build --remove-orphans
 ```
 
-LM Studio + vLLM ASR:
+Docker model runner:
 
 ```bash
-docker compose --profile vllm up -d --build --remove-orphans
+docker compose --profile docker-llm up -d --build --remove-orphans --scale bot=0
 ```
 
-Docker model runner + classic ASR:
+Sidecar only (no bot):
 
 ```bash
-docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
+docker compose --profile voice-sidecar up -d --build --scale bot=0 --scale bot_sidecar=0
+curl http://127.0.0.1:8081/health
 ```
 
-Docker model runner + vLLM ASR:
+Bot + sidecar together (draft runtime split):
 
 ```bash
-docker compose --profile docker-llm --profile vllm up -d --build --remove-orphans --scale bot=0
+docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
 ```
+(This uses `bot_sidecar` with sidecar env preconfigured and health-gated startup.)
 
-## Switch backend safely
+Runtime note:
+- With sidecar mode enabled, bot startup syncs active recording state from sidecar API
+  (fallback: `data/runtime/voice_sidecar_state.json`) and restores rotation loop metadata.
 
-Recommended:
+## Stop
 
 ```bash
-python scripts/switch_asr_backend.py --backend asr --up
-python scripts/switch_asr_backend.py --backend vllm --up
+docker compose down
 ```
-
-Manual:
-
-1. Stop old backend service:
-   - LM Studio mode: `docker compose stop whisper whisper_vllm bot`
-   - Docker LLM mode: `docker compose stop whisper whisper_vllm bot_docker_llm`
-2. Update `.env` backend keys
-3. Start target profile (commands from **Start** section)
 
 ## Pre-session health check
 
@@ -70,31 +61,37 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 ## Session flow in Discord
 
 1. `/chronicle_setup_channels`
-2. `/chronicle_start`
-3. `/chronicle_stop`
+2. `/chronicle_campaign_create` (once per campaign)
+3. `/chronicle_campaign_use`
+4. `/chronicle_start`
+5. `/chronicle_stop`
 
 Operational commands:
 
 - `/chronicle_status`
 - `/chronicle_reconnect`
 - `/chronicle_reprocess_last`
+- `/chronicle_reprocess`
 
 ## Logs
 
-LM Studio mode:
+LM Studio / external LLM mode:
 
 ```bash
 docker compose logs -f bot
-docker compose logs -f whisper
-docker compose logs -f whisper_vllm
 ```
 
-Docker LLM mode:
+Docker model runner mode:
 
 ```bash
 docker compose logs -f bot_docker_llm
-docker compose logs -f whisper
-docker compose logs -f whisper_vllm
+```
+
+Sidecar mode:
+
+```bash
+docker compose logs -f voice_sidecar
+docker compose logs -f bot_sidecar
 ```
 
 ## Cleanup and retention

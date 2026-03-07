@@ -2,7 +2,7 @@
 
 Discord bot for DnD/TTRPG with a fully local pipeline:
 - record a Discord voice channel;
-- transcribe audio through a local Whisper webservice (`onerahmet/openai-whisper-asr-webservice`);
+- transcribe audio through local `Qwen3-ASR` inference in Python;
 - generate a summary and player-facing chronicle post through a local OpenAI-compatible LLM endpoint (LM Studio or Docker model runner);
 - publish everything to a dedicated text channel for chronicles.
 
@@ -10,9 +10,10 @@ Discord bot for DnD/TTRPG with a fully local pipeline:
 
 Pick one path first, then follow only that section:
 
-1. Local Python app + external Whisper/LLM endpoints.
+1. Local Python app + local Qwen ASR + external LLM endpoint.
 2. Docker Compose + LM Studio (default bot service, no Docker LLM model).
 3. Docker Compose + Docker model runner (`docker-llm` profile, no LM Studio required).
+4. Optional: run Node voice sidecar skeleton (`voice-sidecar` profile, control API only).
 
 ## Quickstart (5 min, Local Python Mode)
 
@@ -35,7 +36,7 @@ Copy-Item .env.example .env
 ```
 2. Fill `.env` basic keys:
    - `DISCORD_BOT_TOKEN`
-   - `WHISPER_BASE_URL`
+   - `ASR_BACKEND=qwen3_asr` (default) or `ASR_BACKEND=vibevoice_asr`
    - `LLM_BASE_URL`
    - `LLM_MODEL`
 
@@ -65,7 +66,7 @@ Additional practical documentation:
 flowchart LR
   A[Discord Voice Channel] --> B[Chronicle Keeper Bot]
   B --> C[Per-user Audio Segments mp3]
-  C --> D[Whisper ASR]
+  C --> D[Qwen3-ASR]
   D --> E[Per-speaker Transcripts]
   E --> F[Chunked + Hierarchical Summarization]
   F --> G[Local LLM API]
@@ -92,7 +93,7 @@ Standalone diarization is not required: the bot receives separate tracks per Dis
 - Python 3.11+
 - `ffmpeg` in `PATH` (for WAV -> MP3 compression)
 - Discord bot token
-- Local Whisper service (example: `http://127.0.0.1:9000`)
+- Local ASR via Python (`ASR_BACKEND=qwen3_asr` or `ASR_BACKEND=vibevoice_asr`)
 - OpenAI-compatible LLM endpoint:
   - LM Studio (usually `http://127.0.0.1:1234/v1`), or
   - Docker Compose model runner (`docker-llm` profile)
@@ -128,28 +129,19 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 
 ### Runtime config highlights
 
+- `ASR_BACKEND=qwen3_asr|vibevoice_asr`
+- Shared ASR defaults:
+  - `ASR_LANGUAGE=ru|uk|en`
+  - `ASR_DTYPE=auto|bfloat16|float16|float32`
+  - `ASR_MAX_NEW_TOKENS` (global cap; backend-specific overrides optional)
 - `AUDIO_DUAL_PIPELINE_ENABLED=false` (default): single transcription pass from processed audio.
 - `AUDIO_DUAL_PIPELINE_ENABLED=true`: dual pass:
-  timeline timestamps from raw audio (no VAD), transcript text from processed audio.
-  This improves chronology + ASR quality but increases processing time.
-- `WHISPER_API_STYLE=asr|openai`:
-  - `asr` uses `WHISPER_ASR_PATH=/asr` style API.
-  - `openai` uses `WHISPER_ASR_PATH=/v1/audio/transcriptions` and `WHISPER_OPENAI_MODEL`.
-- OpenAI-style ASR quality knobs:
-  - `WHISPER_OPENAI_TEMPERATURE=0.0` for stable/deterministic transcripts.
-  - `WHISPER_OPENAI_PROMPT=` to hint character names/lore vocabulary.
-- `WHISPER_WARMUP_ON_START=true` sends a tiny startup ASR request to reduce first real request latency.
-- Optional Whisper failover:
-  - `WHISPER_FALLBACK_ENABLED=true`
-  - `WHISPER_FALLBACK_BASE_URL=http://whisper:9000` (or another ASR endpoint)
-  - optional overrides: `WHISPER_FALLBACK_API_STYLE`, `WHISPER_FALLBACK_ASR_PATH`, `WHISPER_FALLBACK_OPENAI_MODEL`
-  - if primary ASR request fails, bot retries once via fallback target.
-- Optional weak-result failover (quality gate):
-  - `WHISPER_FALLBACK_ON_LOW_QUALITY=true`
-  - `WHISPER_LOW_QUALITY_MIN_CHARS=40`
-  - `WHISPER_LOW_QUALITY_MIN_SEGMENTS=1`
-  - if primary transcript is too short/sparse, bot retries via fallback and keeps the better result.
+  raw pass can be used as fallback text source, primary transcript text still comes from processed audio.
+  This may improve robustness on noisy segments but increases processing time.
+- `QWEN3_ASR_*` options are only needed for Qwen-specific tuning.
+- `QWEN3_ASR_ATTN_IMPLEMENTATION=sdpa|flash_attention_2` switches attention backend.
 - `LLM_WARMUP_ON_START=true` sends a tiny startup LLM completion request to reduce first summary latency.
+- `LLM_CHRONICLE_MIN_WORDS` / `LLM_CHRONICLE_MAX_WORDS` control target length of the Player-Facing Chronicle Post section.
 - Optional LM Studio auto-load on demand:
   - `LMSTUDIO_AUTO_LOAD=true`
   - model is always taken from `LLM_MODEL`
@@ -157,13 +149,15 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
   - optional path: `LMSTUDIO_CONTROL_LOAD_PATH=/api/v1/models/load`
   - if endpoint returns "No models loaded", bot requests model load once and retries completion.
 - `AUDIO_NORMALIZE=false` (default): only MP3 compression.
-- `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before Whisper.
+- `AUDIO_NORMALIZE=true`: apply mild normalization (`highpass + loudnorm`) before ASR.
 - `AUDIO_VAD_ENABLED=false` (default): keep pauses/silence as-is.
 - `AUDIO_VAD_ENABLED=true`: trim longer silence using conservative ffmpeg `silenceremove` settings.
 - `AUDIO_MP3_VBR_QUALITY=4` (default): MP3 VBR quality (`0` best/largest .. `9` smallest).
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
 - Recommended long-session preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`.
 - Keep `AUDIO_VAD_ENABLED=false` for the first pass unless you specifically need silence trimming.
+- Optional sidecar routing (draft): `VOICE_SIDECAR_ENABLED=true` with `VOICE_SIDECAR_BASE_URL=http://127.0.0.1:8081` and shared `SIDECAR_TOKEN`.
+- Optional live ASR in sidecar mode: `LIVE_CHUNK_TRANSCRIBE_ON_ROTATION=true` (incremental ASR kicks in after each rotation, so final stop is mostly summary work).
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
 - Extra compact preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=6`.
 - Voice decode burst guard (auto recovery for repeated decode failures):
@@ -174,7 +168,6 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 
 Long session processing options:
 - `PROCESSING_TIMEOUT_SECONDS=7200` sets max end-of-session processing time.
-- `SUMMARY_CHUNK_CHARS=14000` controls transcript chunk size for hierarchical summarization.
 - Optional context relevance gate for off-topic sessions:
   - `SUMMARY_CONTEXT_RELEVANCE_GATE=true`
   - `SUMMARY_CONTEXT_MIN_RELEVANCE=0.40`
@@ -184,7 +177,6 @@ Long session processing options:
 - `RECOVERY_MAX_SESSIONS=20` limits how many unfinished sessions are auto-posted per startup.
 - Active runtime session state is persisted at `data/runtime/active_sessions.json`.
 - The bot now writes processing checkpoints to `data/sessions/<guild_id>/<session_ts>/processing_state.json`.
-- For very long sessions, chunk summaries are saved in `summary_chunks/` and combined into final `summary.md`.
 - In Discord, full transcript is posted as attached `full_transcript.txt` instead of inline long messages.
 - Bot posts `mixed_session.mp3` by default (single convenient listening track).
 - Optional per-speaker audio posting is available via `PUBLISH_PER_SPEAKER_AUDIO=true`.
@@ -207,12 +199,124 @@ docker run --rm \
   discord-chronicle-keeper
 ```
 
-If Whisper and LM Studio run on your host machine,
-set these in `.env`:
+If Qwen ASR and LLM run on your host machine, set these in `.env`:
 
 ```env
-WHISPER_BASE_URL=http://<host-ip-or-dns>:9000
 LLM_BASE_URL=http://<host-ip-or-dns>:1234/v1
+```
+
+## Qwen3-ASR experiment
+
+You can try Qwen3-ASR locally without changing the bot pipeline.
+
+### Create transcript test envs (Windows)
+
+Baseline env (`sdpa`):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+FlashAttention env (`flash_attention_2`):
+
+```powershell
+python -m venv .venv-fa2-win283
+.\.venv-fa2-win283\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu129
+python -m pip install "https://github.com/LDNKS094/flash_attn_windows_2.8.3/releases/download/v2.8.3/flash_attn-2.8.3%2Btorch2.8.0cu129-cp312-cp312-win_amd64.whl"
+python -m pip install qwen-asr transformers numpy soundfile librosa
+```
+
+Quick sanity checks:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+.\.venv-fa2-win283\Scripts\python.exe -c "import torch, flash_attn; print(torch.__version__, torch.cuda.is_available(), flash_attn.__version__)"
+```
+
+Bootstrap helper (creates base and/or flash env):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_qwen_envs.ps1 -Base
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_qwen_envs.ps1 -Flash
+```
+
+One-shot benchmark (SDPA vs FlashAttention2 on one audio file):
+
+```powershell
+.\.venv\Scripts\python.exe scripts/benchmark_qwen_envs.py `
+  --audio data/sessions/1373716879985873016/20260227_173322/audio/___911732749860212746_seg001.mp3
+```
+
+Install the minimal package (baseline `.venv`):
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -U qwen-asr
+```
+
+Run a local audio file through the transformers backend:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/test_qwen3_asr.py `
+  --audio data/sessions/1373716879985873016/20260227_173322/audio/___911732749860212746_seg001.mp3 `
+  --language Russian
+```
+
+Try timestamps with the optional forced aligner:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/test_qwen3_asr.py `
+  --audio data/sessions/1373716879985873016/20260227_173322/audio/___911732749860212746_seg001.mp3 `
+  --language Russian `
+  --forced-aligner Qwen/Qwen3-ForcedAligner-0.6B `
+  --return-time-stamps
+```
+
+The script prints backend, GPU visibility, dtype, and transcript text.
+
+
+### VibeVoice-ASR (separate env)
+
+Create dedicated env (keeps main `.venv` untouched):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_vibe_env.ps1
+```
+
+Manual one-file run:
+
+```powershell
+.\.venv-vibe\Scripts\python.exe scripts/test_vibevoice_asr.py `
+  --audio data/sessions/1373716879985873016/20260227_173322/audio/___911732749860212746_seg001.mp3 `
+  --language Russian
+```
+
+Use VibeVoice inside bot runtime:
+
+```env
+ASR_BACKEND=vibevoice_asr
+VIBEVOICE_PYTHON=.\.venv-vibe\Scripts\python.exe
+VIBEVOICE_SCRIPT=scripts/test_vibevoice_asr.py
+VIBEVOICE_MODEL=microsoft/VibeVoice-ASR-HF
+```
+
+Shared ASR params are reused by both backends:
+
+```env
+ASR_LANGUAGE=ru
+ASR_DTYPE=float16
+ASR_MAX_NEW_TOKENS=4096
+```
+To use Qwen3-ASR inside the bot itself, set:
+
+```env
+ASR_BACKEND=qwen3_asr
+QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+ASR_DTYPE=float16
 ```
 
 ## Docker Compose
@@ -220,54 +324,32 @@ LLM_BASE_URL=http://<host-ip-or-dns>:1234/v1
 This repo includes compose services for both LLM modes:
 - `bot` (default): Discord Chronicle Keeper + external LM Studio endpoint
 - `bot_docker_llm` (`docker-llm` profile): Discord Chronicle Keeper + Docker model runner
-- `whisper`: `discord-chronicle-whisper5090:latest` (build recipe included)
-- `whisper_vllm` (optional profile): vLLM OpenAI-compatible transcription endpoint
+- `bot_sidecar` (`voice-sidecar` profile): bot preconfigured for sidecar mode (`VOICE_SIDECAR_ENABLED=true`)
+- `voice_sidecar` (`voice-sidecar` profile): Node voice runtime + control API
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
-Start stack with classic `/asr` Whisper backend + LM Studio (default LLM backend):
+Start stack with LM Studio (default LLM backend):
 
 ```bash
-docker compose --profile asr up -d --build --remove-orphans
+docker compose up -d --build --remove-orphans
 ```
 
-Start stack with classic `/asr` Whisper backend + Docker model runner:
+Start stack with Docker model runner:
 
 ```bash
-docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
+docker compose --profile docker-llm up -d --build --remove-orphans --scale bot=0
 ```
 
 View logs (LM Studio mode):
 
 ```bash
 docker compose logs -f bot
-docker compose logs -f whisper
 ```
 
 View logs (Docker LLM mode):
 
 ```bash
 docker compose logs -f bot_docker_llm
-docker compose logs -f whisper
-```
-
-Start stack with vLLM Whisper backend (OpenAI transcription API):
-
-```bash
-docker compose --profile vllm up -d --build --remove-orphans
-docker compose logs -f whisper_vllm
-```
-
-Start stack with vLLM Whisper + Docker model runner:
-
-```bash
-docker compose --profile docker-llm --profile vllm up -d --build --remove-orphans --scale bot=0
-```
-
-Helper to switch backend and optionally restart compose:
-
-```bash
-python scripts/switch_asr_backend.py --backend asr --up
-python scripts/switch_asr_backend.py --backend vllm --up
 ```
 
 Stop:
@@ -276,113 +358,40 @@ Stop:
 docker compose down
 ```
 
+Start only sidecar runtime/API (for contract/integration testing):
+
+```bash
+docker compose --profile voice-sidecar up -d --build
+curl http://127.0.0.1:8081/health
+```
+
+Smoke sidecar contract (health/start/status/rotate/stop):
+
+```bash
+python scripts/smoke_sidecar.py --base-url http://127.0.0.1:8081
+```
+
+Manual sidecar E2E (real voice capture to WAV):
+
+```bash
+python scripts/smoke_sidecar_e2e.py --base-url http://127.0.0.1:8081 --guild-id <guild_id> --voice-channel-id <voice_channel_id> --rotate-once
+```
+
 Notes:
-- Whisper Dockerfile is at `docker/whisper5090/Dockerfile` and reproduces the CUDA 12.8 torch patch for RTX 5090.
-- Optional vLLM audio Dockerfile is at `docker/vllm-whisper-audio/Dockerfile` (installs `vllm[audio]`).
-- Compose overrides Whisper URL to internal service name:
-  - bot default: `WHISPER_BASE_URL=http://whisper:9000`
-  - override via `.env`: `BOT_WHISPER_BASE_URL=http://whisper_vllm:8000`
-- For vLLM OpenAI transcription API set in `.env`:
-  - `WHISPER_API_STYLE=openai`
-  - `WHISPER_ASR_PATH=/v1/audio/transcriptions`
-  - `WHISPER_OPENAI_MODEL=openai/whisper-large-v3-turbo`
-  - `WHISPER_OPENAI_TEMPERATURE=0.0`
-  - `WHISPER_OPENAI_PROMPT=Names: <your party names and world terms>`
-  - `WHISPER_WARMUP_ON_START=true`
-- Whisper model/engine are configurable via `.env`:
-  - `WHISPER_ASR_ENGINE` (`openai_whisper` or `faster_whisper`)
-  - `WHISPER_ASR_MODEL` (for example `large-v3-turbo`, `large-v3`, `distil-large-v3`)
-  - `WHISPER_ASR_MODEL_PATH` (container path for cached/local models)
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
   - `LLM_MODEL` (selected model name)
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
+- Sidecar contract (draft): `docs/voice-sidecar-contract.md`.
 
-### Local Whisper Model (CT2)
-
-For custom local models with `faster_whisper`, convert and mount a CTranslate2 model:
-
-Install conversion dependencies in your active Python environment first:
+Sidecar + bot mode (draft path, with health-gated startup):
 
 ```bash
-python -m pip install ctranslate2 transformers torch
+docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
 ```
-
-```bash
-ct2-transformers-converter \
-  --model anuragshas/whisper-large-v2-uk \
-  --output_dir whisper-large-v2-uk \
-  --quantization float16
-```
-
-Place converted files under `./data/whisper-models/whisper-large-v2-uk`, then set in `.env`:
-
-```env
-WHISPER_ASR_ENGINE=faster_whisper
-WHISPER_ASR_MODEL=/models/whisper/whisper-large-v2-uk
-WHISPER_ASR_MODEL_PATH=/models/whisper
-```
-
-Restart compose after changing model settings:
-
-```bash
-docker compose --profile asr up -d --build --remove-orphans
-# or (Docker model runner backend):
-# docker compose --profile docker-llm --profile asr up -d --build --remove-orphans --scale bot=0
-```
-
-Helper script (converts + updates `.env` automatically):
-
-```bash
-python scripts/prepare_whisper_ct2_model.py \
-  --model anuragshas/whisper-large-v2-uk \
-  --quantization float16
-```
-
-Optional:
-- `--output-name whisper-large-v2-uk`
-- `--env-file .env`
-- `--force` (overwrite existing converted directory)
-
-If conversion previously succeeded but Whisper fails with mel-shape errors
-(for example `expected ... 128 ... got ... 80 ...`), re-run conversion with:
-
-```bash
-python scripts/prepare_whisper_ct2_model.py --model <model-id> --quantization float16 --force
-```
-
-Note: some Hugging Face model repos do not include `tokenizer.json` or
-`preprocessor_config.json`. The helper script now auto-copies only existing files
-and warns if `preprocessor_config.json` is missing (this can cause runtime mel-shape
-mismatch in `faster_whisper`).
-
-### Whisper Benchmark (real recorded file)
-
-Use this helper to benchmark your Whisper endpoint on latest recorded `.mp3`
-(prefers `mixed_session.mp3` when present):
-
-```bash
-python scripts/benchmark_whisper.py --whisper-url http://127.0.0.1:9000 --runs 3
-```
-
-For OpenAI-compatible transcription endpoints (vLLM, etc.):
-
-```bash
-python scripts/benchmark_whisper.py \
-  --api-style openai \
-  --asr-path /v1/audio/transcriptions \
-  --model openai/whisper-large-v3-turbo \
-  --whisper-url http://127.0.0.1:8000 \
-  --runs 3
-```
-
-Or target a specific file:
-
-```bash
-python scripts/benchmark_whisper.py --audio data/sessions/<guild>/<session>/audio/mixed_session.mp3 --runs 3
-```
+(`bot_sidecar` waits for healthy `voice_sidecar`; `--scale bot=0` disables default bot to avoid duplicate Discord login.)
 
 ### Smoke E2E (ASR + LLM)
 
@@ -422,6 +431,7 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_reconnect` - force voice reconnect and try to resume recording manually.
 - `/chronicle_reprocess_last` - reprocess latest saved session for this guild and republish transcript/summary.
 - `/chronicle_reprocess` - reprocess specific session by session id.
+- `/chronicle_repost` - repost existing artifacts for a specific session without reprocessing.
 - `/chronicle_sessions` - list recent sessions for this guild.
 - `/chronicle_session_move` - move a session to another campaign (optional reprocess).
 - `/chronicle_start` - start recording in configured default voice channel; if not configured, uses your current voice channel.
@@ -461,13 +471,13 @@ Use this sequence to record multiple sessions into one campaign cleanly:
 
 ## Current Limitations
 
-- Transcription is generated per-user track. Bot now builds an approximate chronological timeline using Whisper segment timestamps, but it is still not a sample-accurate multi-speaker chat log.
+- Transcription is generated per-user track and merged into speaker buckets; it is not a sample-accurate multi-speaker chat log.
 - Large sessions are better posted in parts: the bot already chunks long messages to fit Discord limits.
 - Voice reconnect/recovery is best-effort; hard crashes can still lose in-memory data between segment rotations.
 - Discord file size limits can prevent uploading `.mp3` artifacts in-channel; full files remain on disk.
 - Quality report is heuristic (duration/bitrate/reconnect/rotation counters) and not a full audio QA system.
-- If `AUDIO_VAD_ENABLED=true` with single-pass mode, silence trimming can shift perceived timing.
-  Use `AUDIO_DUAL_PIPELINE_ENABLED=true` to keep timeline timestamps from raw audio.
+- If `AUDIO_VAD_ENABLED=true`, silence trimming can remove non-speech and affect transcript flow.
+  If needed, compare with `AUDIO_VAD_ENABLED=false` for validation.
 
 ## Versioning
 
@@ -547,12 +557,62 @@ Alternative form:
 python -m chronicle_keeper.reprocess --guild-id <guild_id> --session-id <session_id> --language ru
 ```
 
-This command reads files from `audio/`, re-runs Whisper + LLM processing, and rewrites:
+This command reads files from `audio/`, re-runs ASR + LLM processing, and rewrites:
 - `transcripts/*.md`
 - `full_transcript.md`
 - `full_transcript.txt`
 - `summary.md`
-- `summary_chunks/*.md` (for chunked runs)
+
+Summary-only mode (reuse existing transcripts, refresh only `summary.md`):
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --language ru --summary-only
+```
+
+Transcribe-only mode (incremental by default, no summary generation):
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --transcribe-only
+```
+
+Force full retranscription in transcribe-only mode:
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --transcribe-only --force-transcribe
+```
+
+## Local Smoke Test Without Discord
+
+You can test full ASR+summary pipeline locally (no Discord join/start needed):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --language ru
+```
+
+To emulate rotation (split source into chunk-like segments first):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --segment-seconds 60 --language ru
+```
+
+To explicitly test split flow (transcribe-only then summary-only):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --mode split --segment-seconds 60 --language ru
+```
+
+## Repost Saved Artifacts To Discord (CLI)
+
+Use this to send existing artifacts to Discord without reprocessing:
+
+```bash
+python -m chronicle_keeper.repost --session-dir data/sessions/<guild_id>/<session_id>
+```
+
+Options:
+- `--channel-id <id>` - post to specific text channel (otherwise uses configured chronicle channel for guild).
+- `--mention-user-id <id>` - mention DM/user in the repost header.
+- `--no-mixed-audio` - skip uploading `mixed_session.mp3`.
 
 ## Testing
 

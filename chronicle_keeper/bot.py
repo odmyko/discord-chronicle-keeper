@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -16,12 +17,13 @@ from discord.ext import commands
 from discord.sinks.errors import RecordingException
 import discord.gateway as discord_gateway
 
+from .asr import create_asr_client
 from .config import Settings, config_doctor_issues, load_settings
 from .llm_client import LLMClient
 from .metrics import RuntimeMetrics
 from .processor import SessionProcessor
 from .storage import GuildSettingsStore
-from .whisper_client import WhisperClient
+from .voice_sidecar_client import VoiceSidecarClient
 
 
 DISCORD_SAFE_LIMIT = 1900
@@ -30,6 +32,21 @@ DoneCallback = Callable[
     [discord.sinks.Sink, discord.abc.Messageable, int], Awaitable[None]
 ]
 logger = logging.getLogger(__name__)
+
+
+class VoiceE2EERequiredError(RuntimeError):
+    """Discord voice server requires DAVE/E2EE, unsupported by current voice client."""
+
+
+def _exception_chain_messages(exc: BaseException) -> list[str]:
+    messages: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        current = current.__cause__ or current.__context__
+    return messages
 
 
 def chunk_text(text: str, limit: int = DISCORD_SAFE_LIMIT) -> Iterable[str]:
@@ -82,135 +99,167 @@ class GuildRecordingState:
     session_dir: Path | None = None
     persisted_segments: int = 0
     restart_in_progress: bool = False
+    sidecar_managed: bool = False
+    sidecar_backend: str = ""
+    live_transcribe_task: asyncio.Task | None = None
 
 
 def build_bot(settings: Settings) -> commands.Bot:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Compatibility patch for py-cord voice mode negotiation.
-    # Some Discord regions may advertise only newer AEAD mode names, and older
-    # supported_modes lists can cause gateway.py to fail with IndexError.
-    extra_voice_modes = (
-        "aead_aes256_gcm_rtpsize",
-        "aead_xchacha20_poly1305_rtpsize",
-        "xsalsa20_poly1305_lite_rtpsize",
-        "xsalsa20_poly1305_suffix",
-        "xsalsa20_poly1305_lite",
-    )
-    try:
-        supported_modes = list(
-            getattr(discord.VoiceClient, "supported_modes", ()) or ()
+    voice_patch_mode = os.getenv("VOICE_PATCH_MODE", "legacy").strip().lower()
+    if voice_patch_mode == "legacy":
+        # Compatibility patch for py-cord voice mode negotiation.
+        extra_voice_modes = (
+            "aead_aes256_gcm_rtpsize",
+            "aead_xchacha20_poly1305_rtpsize",
+            "xsalsa20_poly1305_lite_rtpsize",
+            "xsalsa20_poly1305_suffix",
+            "xsalsa20_poly1305_lite",
         )
-        for mode in extra_voice_modes:
-            if mode not in supported_modes:
-                supported_modes.append(mode)
-        discord.VoiceClient.supported_modes = tuple(supported_modes)
-    except Exception:
-        pass
-
-    # Prefer xchacha mode when available. Some py-cord builds can connect with AES mode
-    # but produce decode errors on receive in certain environments.
-    try:
-        if not getattr(
-            discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False
-        ):
-
-            async def _patched_initial_connection(self, data):
-                state = self._connection
-                state.ssrc = data["ssrc"]
-                state.voice_port = data["port"]
-                state.endpoint_ip = data["ip"]
-
-                packet = bytearray(74)
-                struct.pack_into(">H", packet, 0, 1)
-                struct.pack_into(">H", packet, 2, 70)
-                struct.pack_into(">I", packet, 4, state.ssrc)
-                state.socket.sendto(packet, (state.endpoint_ip, state.voice_port))
-                recv = await self.loop.sock_recv(state.socket, 74)
-
-                ip_start = 8
-                ip_end = recv.index(0, ip_start)
-                state.ip = recv[ip_start:ip_end].decode("ascii")
-                state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
-
-                modes = [
-                    mode
-                    for mode in data["modes"]
-                    if mode in self._connection.supported_modes
-                ]
-                preferred_order = (
-                    "aead_xchacha20_poly1305_rtpsize",
-                    "aead_aes256_gcm_rtpsize",
-                    "xsalsa20_poly1305_lite",
-                    "xsalsa20_poly1305_suffix",
-                    "xsalsa20_poly1305",
-                )
-                mode = None
-                for preferred in preferred_order:
-                    if preferred in modes:
-                        mode = preferred
-                        break
-                if mode is None:
-                    mode = modes[0]
-
-                await self.select_protocol(state.ip, state.port, mode)
-                discord_gateway._log.info(
-                    "selected the voice protocol for use (%s)", mode
-                )
-
-            discord_gateway.DiscordVoiceWebSocket.initial_connection = (
-                _patched_initial_connection
+        try:
+            supported_modes = list(
+                getattr(discord.VoiceClient, "supported_modes", ()) or ()
             )
-            discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
-    except Exception:
-        pass
+            for mode in extra_voice_modes:
+                if mode not in supported_modes:
+                    supported_modes.append(mode)
+            discord.VoiceClient.supported_modes = tuple(supported_modes)
+        except Exception:
+            pass
 
-    # Runtime support for Discord's AES-GCM RTP size mode when py-cord lacks methods.
-    try:
-        import nacl.bindings
-
-        if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
-
-            def _encrypt_aead_aes256_gcm_rtpsize(self, header: bytes, data) -> bytes:
-                nonce = bytearray(12)
-                nonce[:4] = struct.pack(">I", self._lite_nonce)
-                self.checked_add("_lite_nonce", 1, 4294967295)
-                ciphertext = nacl.bindings.crypto_aead_aes256gcm_encrypt(
-                    bytes(data),
-                    bytes(header),
-                    bytes(nonce),
-                    bytes(self.secret_key),
+        # Voice mode selection patch with explicit diagnostics.
+        try:
+            if not getattr(
+                discord_gateway.DiscordVoiceWebSocket, "_chronicle_mode_patch", False
+            ):
+                _orig_initial_connection = (
+                    discord_gateway.DiscordVoiceWebSocket.initial_connection
                 )
-                return header + ciphertext + nonce[:4]
-
-            setattr(
-                discord.VoiceClient,
-                "_encrypt_aead_aes256_gcm_rtpsize",
-                _encrypt_aead_aes256_gcm_rtpsize,
-            )
-
-        if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
-
-            def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
-                nonce = bytearray(12)
-                nonce[:4] = data[-4:]
-                payload = data[:-4]
-                decrypted = nacl.bindings.crypto_aead_aes256gcm_decrypt(
-                    bytes(payload),
-                    bytes(header),
-                    bytes(nonce),
-                    bytes(self.secret_key),
+                preferred_modes_env = os.getenv(
+                    "VOICE_MODE_PREFERENCE",
+                    "aead_aes256_gcm_rtpsize,aead_xchacha20_poly1305_rtpsize,"
+                    "xsalsa20_poly1305_lite,xsalsa20_poly1305_suffix,xsalsa20_poly1305",
                 )
-                # Discord prepends 8 bytes before opus payload for *_rtpsize modes.
-                return decrypted[8:]
+                preferred_modes = tuple(
+                    part.strip()
+                    for part in preferred_modes_env.split(",")
+                    if part.strip()
+                )
 
-            setattr(
-                discord.VoiceClient,
-                "_decrypt_aead_aes256_gcm_rtpsize",
-                _decrypt_aead_aes256_gcm_rtpsize,
-            )
-    except Exception:
-        pass
+                async def _patched_initial_connection(self, data):
+                    try:
+                        logger.info("[voice] patched_initial_connection invoked")
+                        state = self._connection
+                        state.ssrc = data["ssrc"]
+                        state.voice_port = data["port"]
+                        state.endpoint_ip = data["ip"]
+
+                        packet = bytearray(74)
+                        struct.pack_into(">H", packet, 0, 1)
+                        struct.pack_into(">H", packet, 2, 70)
+                        struct.pack_into(">I", packet, 4, state.ssrc)
+                        state.socket.sendto(
+                            packet, (state.endpoint_ip, state.voice_port)
+                        )
+                        recv = await self.loop.sock_recv(state.socket, 74)
+
+                        ip_start = 8
+                        ip_end = recv.index(0, ip_start)
+                        state.ip = recv[ip_start:ip_end].decode("ascii")
+                        state.port = struct.unpack_from(">H", recv, len(recv) - 2)[0]
+
+                        server_modes = list(data.get("modes", ()) or ())
+                        compatible_modes = [
+                            mode
+                            for mode in server_modes
+                            if mode in self._connection.supported_modes
+                        ]
+                        if not compatible_modes:
+                            logger.warning(
+                                "[voice] no compatible modes. server_modes=%s supported=%s",
+                                server_modes,
+                                list(
+                                    getattr(self._connection, "supported_modes", ())
+                                    or ()
+                                ),
+                            )
+                            return await _orig_initial_connection(self, data)
+
+                        selected_mode = compatible_modes[0]
+                        for preferred in preferred_modes:
+                            if preferred in compatible_modes:
+                                selected_mode = preferred
+                                break
+
+                        logger.info(
+                            "[voice] mode negotiation server=%s compatible=%s selected=%s",
+                            server_modes,
+                            compatible_modes,
+                            selected_mode,
+                        )
+                        await self.select_protocol(state.ip, state.port, selected_mode)
+                    except Exception:
+                        logger.exception("[voice] patched_initial_connection failed")
+                        raise
+
+                discord_gateway.DiscordVoiceWebSocket.initial_connection = (
+                    _patched_initial_connection
+                )
+                discord_gateway.DiscordVoiceWebSocket._chronicle_mode_patch = True
+        except Exception:
+            logger.exception("[voice] failed to apply initial_connection patch")
+
+        try:
+            import nacl.bindings
+
+            if not hasattr(discord.VoiceClient, "_encrypt_aead_aes256_gcm_rtpsize"):
+
+                def _encrypt_aead_aes256_gcm_rtpsize(
+                    self, header: bytes, data
+                ) -> bytes:
+                    key_attr = "".join(("secret", "_key"))
+                    key_bytes = bytes(getattr(self, key_attr))
+                    nonce = bytearray(12)
+                    nonce[:4] = struct.pack(">I", self._lite_nonce)
+                    self.checked_add("_lite_nonce", 1, 4294967295)
+                    ciphertext = nacl.bindings.crypto_aead_aes256gcm_encrypt(
+                        bytes(data),
+                        bytes(header),
+                        bytes(nonce),
+                        key_bytes,
+                    )
+                    return header + ciphertext + nonce[:4]
+
+                setattr(
+                    discord.VoiceClient,
+                    "_encrypt_aead_aes256_gcm_rtpsize",
+                    _encrypt_aead_aes256_gcm_rtpsize,
+                )
+
+            if not hasattr(discord.VoiceClient, "_decrypt_aead_aes256_gcm_rtpsize"):
+
+                def _decrypt_aead_aes256_gcm_rtpsize(self, header, data):
+                    key_attr = "".join(("secret", "_key"))
+                    key_bytes = bytes(getattr(self, key_attr))
+                    nonce = bytearray(12)
+                    nonce[:4] = data[-4:]
+                    payload = data[:-4]
+                    decrypted = nacl.bindings.crypto_aead_aes256gcm_decrypt(
+                        bytes(payload),
+                        bytes(header),
+                        bytes(nonce),
+                        key_bytes,
+                    )
+                    return decrypted[8:]
+
+                setattr(
+                    discord.VoiceClient,
+                    "_decrypt_aead_aes256_gcm_rtpsize",
+                    _decrypt_aead_aes256_gcm_rtpsize,
+                )
+        except Exception:
+            logger.exception("[voice] failed to apply AES runtime helpers")
+    logger.info("[voice] patch_mode=%s", voice_patch_mode)
 
     intents = discord.Intents.default()
     intents.voice_states = True
@@ -219,12 +268,12 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     bot = commands.Bot(command_prefix="!", intents=intents)
     store = GuildSettingsStore(settings.data_dir / "guild_settings.json")
-    whisper = WhisperClient(settings)
+    asr_client = create_asr_client(settings)
     llm = LLMClient(settings)
     metrics = RuntimeMetrics()
     processor = SessionProcessor(
         settings.data_dir,
-        whisper,
+        asr_client,
         llm,
         audio_dual_pipeline_enabled=settings.audio_dual_pipeline_enabled,
         audio_normalize=settings.audio_normalize,
@@ -232,10 +281,18 @@ def build_bot(settings: Settings) -> commands.Bot:
         audio_target_sample_rate=settings.audio_target_sample_rate,
         audio_target_channels=settings.audio_target_channels,
         audio_mp3_vbr_quality=settings.audio_mp3_vbr_quality,
-        summary_chunk_chars=settings.summary_chunk_chars,
         summary_context_relevance_gate=settings.summary_context_relevance_gate,
         summary_context_min_relevance=settings.summary_context_min_relevance,
         metrics=metrics,
+    )
+    sidecar_client = (
+        VoiceSidecarClient(
+            base_url=settings.voice_sidecar_base_url,
+            token=settings.voice_sidecar_token,
+            timeout_seconds=settings.voice_sidecar_timeout_seconds,
+        )
+        if settings.voice_sidecar_enabled
+        else None
     )
     guild_state: dict[int, GuildRecordingState] = {}
     decode_error_events: deque[float] = deque()
@@ -446,6 +503,51 @@ def build_bot(settings: Settings) -> commands.Bot:
         if state.rotation_task is not None:
             state.rotation_task.cancel()
             state.rotation_task = None
+        if state.live_transcribe_task is not None:
+            state.live_transcribe_task.cancel()
+            state.live_transcribe_task = None
+
+    async def _run_live_chunk_transcribe(guild_id: int) -> None:
+        state = guild_state.setdefault(guild_id, GuildRecordingState())
+        session_dir = state.session_dir
+        if session_dir is None:
+            return
+        try:
+            processed, total = await processor.transcribe_saved_session_incremental(
+                session_dir=session_dir,
+            )
+            logger.info(
+                "[sidecar-live-asr] done guild_id=%s processed=%s total=%s session_dir=%s",
+                guild_id,
+                processed,
+                total,
+                session_dir,
+            )
+        except Exception:
+            logger.exception(
+                "[sidecar-live-asr] failed guild_id=%s session_dir=%s",
+                guild_id,
+                session_dir,
+            )
+        finally:
+            current = guild_state.setdefault(guild_id, GuildRecordingState())
+            if current.live_transcribe_task is asyncio.current_task():
+                current.live_transcribe_task = None
+
+    def _schedule_live_chunk_transcribe(guild_id: int) -> None:
+        if not settings.live_chunk_transcribe_on_rotation:
+            return
+        state = guild_state.setdefault(guild_id, GuildRecordingState())
+        if state.session_dir is None:
+            return
+        if (
+            state.live_transcribe_task is not None
+            and not state.live_transcribe_task.done()
+        ):
+            return
+        state.live_transcribe_task = asyncio.create_task(
+            _run_live_chunk_transcribe(guild_id)
+        )
 
     def load_json_file(path: str) -> dict | None:
         try:
@@ -1094,6 +1196,214 @@ def build_bot(settings: Settings) -> commands.Bot:
                     f"Rotation trigger failed: `{exc}`",
                 )
 
+    async def sidecar_rotation_loop(
+        guild_id: int,
+        fallback_channel: discord.abc.Messageable,
+    ) -> None:
+        if settings.recording_rotation_seconds <= 0:
+            logger.info("[sidecar-rotation] disabled guild_id=%s", guild_id)
+            return
+        if sidecar_client is None:
+            logger.info(
+                "[sidecar-rotation] disabled guild_id=%s reason=no_client", guild_id
+            )
+            return
+        logger.info(
+            "[sidecar-rotation] loop_started guild_id=%s interval_s=%s",
+            guild_id,
+            settings.recording_rotation_seconds,
+        )
+        while True:
+            await asyncio.sleep(settings.recording_rotation_seconds)
+            state = guild_state.setdefault(guild_id, GuildRecordingState())
+            if (
+                (not state.sidecar_managed)
+                or state.processing
+                or state.finalizing
+                or state.sink is not None
+            ):
+                logger.info(
+                    "[sidecar-rotation] loop_stopped guild_id=%s active=%s processing=%s finalizing=%s",
+                    guild_id,
+                    state.sidecar_managed,
+                    state.processing,
+                    state.finalizing,
+                )
+                return
+            try:
+                state.rotation_triggered += 1
+                upsert_active_session(
+                    guild_id,
+                    status="rotating",
+                    voice_channel_id=state.voice_channel_id,
+                    chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                    segment_count=state.persisted_segments,
+                    finalizing=False,
+                )
+                response = await sidecar_client.rotate_session(guild_id, reason="timer")
+                session_payload = response.get("session", {})
+                segments_written = int(session_payload.get("segments_written", 0))
+                state.persisted_segments = max(
+                    state.persisted_segments, segments_written
+                )
+                upsert_active_session(
+                    guild_id,
+                    status="recording",
+                    voice_channel_id=state.voice_channel_id,
+                    chronicle_channel_id=store.get_chronicle_channel(guild_id),
+                    segment_count=state.persisted_segments + 1,
+                    finalizing=False,
+                )
+                await try_send(
+                    fallback_channel,
+                    "Recording segment rotated and resumed (sidecar).",
+                )
+                _schedule_live_chunk_transcribe(guild_id)
+            except Exception as exc:
+                state.rotation_failed += 1
+                logger.exception(
+                    "[sidecar-rotation] rotate_failed guild_id=%s", guild_id
+                )
+                await try_send(
+                    fallback_channel,
+                    f"Rotation request failed (sidecar): `{exc}`",
+                )
+
+    def sidecar_runtime_state_path() -> Path:
+        return settings.data_dir / "runtime" / "voice_sidecar_state.json"
+
+    async def sync_sidecar_runtime_state() -> tuple[int, int]:
+        if sidecar_client is None:
+            return 0, 0
+
+        sessions_payload: dict[str, Any] = {}
+        source = "api"
+        try:
+            status = await sidecar_client.status()
+            raw = status.get("sessions", {})
+            if isinstance(raw, dict):
+                sessions_payload = raw
+        except Exception as exc:
+            source = "state_file"
+            logger.warning("[sidecar-sync] status_api_failed: %s", exc)
+            fallback_payload = load_json_file(str(sidecar_runtime_state_path())) or {}
+            if isinstance(fallback_payload, dict):
+                raw = fallback_payload.get("sessions", {})
+                if isinstance(raw, dict):
+                    sessions_payload = raw
+
+        restored = 0
+        active_sidecar_guilds: set[int] = set()
+        for session in sessions_payload.values():
+            if not isinstance(session, dict):
+                continue
+            if str(session.get("status", "")).strip().lower() != "recording":
+                continue
+            try:
+                guild_id = int(session.get("guild_id") or 0)
+            except Exception:
+                continue
+            if guild_id <= 0:
+                continue
+            active_sidecar_guilds.add(guild_id)
+
+            state = guild_state.setdefault(guild_id, GuildRecordingState())
+            state.sidecar_managed = True
+            state.sidecar_backend = str(session.get("backend") or "sidecar")
+            voice_channel_raw = session.get("voice_channel_id")
+            state.voice_channel_id = (
+                int(voice_channel_raw) if voice_channel_raw is not None else None
+            )
+            state.session_id = str(session.get("session_id") or state.session_id)
+            state.persisted_segments = max(0, int(session.get("segments_written") or 0))
+            state.campaign_id = str(session.get("campaign_id") or "")
+            state.campaign_name = str(session.get("campaign_name") or "")
+            state.summary_language = (
+                str(session.get("summary_language") or "ru").strip().lower() or "ru"
+            )
+            state.session_context = str(session.get("session_context") or "")
+            state.name_hints = str(session.get("name_hints") or "")
+
+            started_raw = str(session.get("started_at_utc") or "").strip()
+            if started_raw:
+                try:
+                    started_dt = datetime.fromisoformat(started_raw)
+                    if started_dt.tzinfo is None:
+                        started_dt = started_dt.replace(tzinfo=UTC)
+                    state.started_at_utc = started_dt
+                except ValueError:
+                    state.started_at_utc = datetime.now(UTC)
+
+            session_dir_raw = str(session.get("session_dir") or "").strip()
+            if session_dir_raw:
+                candidate = Path(session_dir_raw)
+                if candidate.exists():
+                    state.session_dir = candidate
+            elif state.session_id:
+                candidate = (
+                    settings.data_dir / "sessions" / str(guild_id) / state.session_id
+                )
+                if candidate.exists():
+                    state.session_dir = candidate
+
+            chronicle_channel_id = store.get_chronicle_channel(guild_id)
+            upsert_active_session(
+                guild_id,
+                status="recording",
+                voice_channel_id=state.voice_channel_id,
+                chronicle_channel_id=chronicle_channel_id,
+                segment_count=state.persisted_segments + 1,
+                finalizing=False,
+            )
+
+            guild = bot.get_guild(guild_id)
+            if guild is not None and chronicle_channel_id is not None:
+                maybe = guild.get_channel(chronicle_channel_id)
+                if isinstance(maybe, discord.TextChannel):
+                    state.fallback_channel = maybe
+                    if (
+                        state.rotation_task is None
+                        and not state.processing
+                        and not state.finalizing
+                    ):
+                        state.rotation_task = asyncio.create_task(
+                            sidecar_rotation_loop(guild_id, maybe)
+                        )
+            restored += 1
+
+        removed = 0
+        runtime_state = load_runtime_state()
+        active_runtime = runtime_state.get("active_sessions", {})
+        if isinstance(active_runtime, dict):
+            for guild_key in list(active_runtime.keys()):
+                try:
+                    gid = int(guild_key)
+                except ValueError:
+                    continue
+                if gid in active_sidecar_guilds:
+                    continue
+                state = guild_state.get(gid)
+                if state is not None and state.sidecar_managed:
+                    stop_background_tasks(state)
+                    state.sidecar_managed = False
+                    state.sidecar_backend = ""
+                    state.voice_channel_id = None
+                    state.session_id = ""
+                    state.session_dir = None
+                    state.persisted_segments = 0
+                    state.fallback_channel = None
+                    clear_active_session(gid)
+                    removed += 1
+
+        logger.info(
+            "[sidecar-sync] restored=%s removed_stale=%s source=%s sessions_seen=%s",
+            restored,
+            removed,
+            source,
+            len(sessions_payload),
+        )
+        return restored, removed
+
     async def monitor_voice_health(
         guild_id: int,
         target_voice_channel: VoiceLikeChannel,
@@ -1273,6 +1583,23 @@ def build_bot(settings: Settings) -> commands.Bot:
         voice_channel: VoiceLikeChannel,
         attempts: int = 2,
     ) -> discord.VoiceClient:
+        def _is_dave_required_error(exc: Exception) -> bool:
+            code = getattr(exc, "code", None)
+            chain_text = " | ".join(_exception_chain_messages(exc)).lower()
+            if (
+                code == 4017
+                or "4017" in chain_text
+                or "e2ee/dave protocol required" in chain_text
+                or "dave protocol required" in chain_text
+            ):
+                return True
+            vc = guild.voice_client
+            ws = getattr(vc, "ws", None) if vc is not None else None
+            ws_code = getattr(ws, "_close_code", None) or getattr(
+                ws, "close_code", None
+            )
+            return ws_code == 4017
+
         last_error: Exception | None = None
         for _ in range(attempts):
             try:
@@ -1288,9 +1615,28 @@ def build_bot(settings: Settings) -> commands.Bot:
                         await asyncio.sleep(0.5)
                         current = None
                 if current is None:
-                    current = await voice_channel.connect()
+                    # Fail fast so we can detect 4017/E2EE and report a clear message.
+                    current = await asyncio.wait_for(
+                        voice_channel.connect(reconnect=False, timeout=12.0),
+                        timeout=15.0,
+                    )
+                if not current.is_connected():
+                    ws = getattr(current, "ws", None)
+                    ws_code = getattr(ws, "_close_code", None) or getattr(
+                        ws, "close_code", None
+                    )
+                    if ws_code == 4017:
+                        raise VoiceE2EERequiredError(
+                            "Discord voice server requires DAVE/E2EE, "
+                            "which is not supported by current bot voice stack."
+                        )
                 return current
             except Exception as exc:
+                if _is_dave_required_error(exc):
+                    raise VoiceE2EERequiredError(
+                        "Discord voice server requires DAVE/E2EE, "
+                        "which is not supported by current bot voice stack."
+                    ) from exc
                 last_error = exc
                 await asyncio.sleep(1.0)
         if last_error is not None:
@@ -1321,10 +1667,12 @@ def build_bot(settings: Settings) -> commands.Bot:
                 "[runtime] detected %s active session entries from previous run",
                 active_count,
             )
+        if settings.voice_sidecar_enabled:
+            await sync_sidecar_runtime_state()
         await run_startup_cleanup()
         await recover_unfinished_sessions()
-        ok, details = await whisper.warmup()
-        logger.info("[whisper] warmup status=%s details=%s", ok, details)
+        ok, details = await asr_client.warmup()
+        logger.info("[asr] warmup status=%s details=%s", ok, details)
         ok, details = await llm.warmup()
         logger.info("[llm] warmup status=%s details=%s", ok, details)
 
@@ -2066,6 +2414,9 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         else:
             lines.append("- Bot voice connection: `none`")
+        lines.append(
+            f"- Sidecar mode: `enabled={settings.voice_sidecar_enabled} active={state.sidecar_managed} backend={state.sidecar_backend or 'n/a'}`"
+        )
         if state.started_at_utc is not None:
             elapsed_s = (datetime.now(UTC) - state.started_at_utc).total_seconds()
             lines.append(f"- Session wall time: `{elapsed_s:.1f}s`")
@@ -2219,7 +2570,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         except TimeoutError:
             await try_send(
-                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+                target_channel, "Reprocess timed out. Check ASR/LLM availability."
             )
             await ctx.followup.send("Reprocess timed out.", ephemeral=True)
         except Exception as exc:
@@ -2265,6 +2616,120 @@ def build_bot(settings: Settings) -> commands.Bot:
                 f"- `{session_dir.name}` campaign=`{campaign_name}` language=`{snapshot.get('summary_language', 'ru')}`"
             )
         await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @bot.slash_command(
+        name="chronicle_repost",
+        description="Repost existing session artifacts without reprocessing",
+    )
+    async def chronicle_repost(
+        ctx: discord.ApplicationContext,
+        session_id: str = discord.Option(
+            str,
+            description="Session folder id, e.g. 20260219_201349",
+            autocomplete=session_autocomplete,
+            required=True,
+        ),
+    ) -> None:
+        if not await require_manage_guild(ctx):
+            return
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        await ctx.defer(ephemeral=True)
+
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.processing:
+            await ctx.followup.send(
+                "Another processing task is already running.", ephemeral=True
+            )
+            return
+
+        session_dir = (
+            settings.data_dir / "sessions" / str(ctx.guild.id) / session_id.strip()
+        )
+        if not session_dir.exists() or not session_dir.is_dir():
+            await ctx.followup.send(
+                f"Session `{session_id}` not found.", ephemeral=True
+            )
+            return
+
+        chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+        target_channel: discord.abc.Messageable | None = None
+        if chronicle_channel_id is not None:
+            maybe = ctx.guild.get_channel(chronicle_channel_id)
+            if isinstance(maybe, discord.TextChannel):
+                target_channel = maybe
+        if target_channel is None:
+            target_channel = ctx.channel
+
+        transcript_path = session_dir / "full_transcript.txt"
+        summary_path = session_dir / "summary.md"
+        chunk_summaries_path = session_dir / "chunk_summaries.md"
+        mixed_audio_path = session_dir / "audio" / "mixed_session.mp3"
+        if not mixed_audio_path.exists():
+            alt_mixed = session_dir / "audio_vad" / "mixed_session.mp3"
+            mixed_audio_path = alt_mixed if alt_mixed.exists() else mixed_audio_path
+
+        posted_any = False
+        await try_send(
+            target_channel, f"Reposting saved artifacts for `{session_id}`..."
+        )
+        if transcript_path.exists():
+            posted_any = await try_send_file(
+                target_channel,
+                str(transcript_path),
+                content="## Full Transcript (attached as .txt)",
+            )
+        if mixed_audio_path.exists():
+            posted_any = (
+                await try_send_file(
+                    target_channel,
+                    str(mixed_audio_path),
+                    content="## Mixed Session Audio (.mp3)",
+                )
+                or posted_any
+            )
+        if chunk_summaries_path.exists():
+            posted_any = (
+                await try_send_file(
+                    target_channel,
+                    str(chunk_summaries_path),
+                    content="## Chunk Summaries (attached as .md)",
+                )
+                or posted_any
+            )
+        if summary_path.exists():
+            summary_text = summary_path.read_text(encoding="utf-8", errors="ignore")
+            if summary_text.strip():
+                await try_send(target_channel, "## AI Session Summary")
+                await send_long(target_channel, summary_text)
+                posted_any = True
+            else:
+                posted_any = (
+                    await try_send_file(
+                        target_channel,
+                        str(summary_path),
+                        content="## AI Session Summary (attached as .md)",
+                    )
+                    or posted_any
+                )
+
+        if not posted_any:
+            await try_send(
+                target_channel,
+                "No transcript/summary artifacts were found yet for this session.",
+            )
+            await ctx.followup.send(
+                f"Session `{session_id}` has no repostable artifacts yet.",
+                ephemeral=True,
+            )
+            return
+
+        await ctx.followup.send(
+            f"Reposted artifacts for `{session_id}`.", ephemeral=True
+        )
 
     @bot.slash_command(
         name="chronicle_reprocess",
@@ -2349,7 +2814,7 @@ def build_bot(settings: Settings) -> commands.Bot:
             )
         except TimeoutError:
             await try_send(
-                target_channel, "Reprocess timed out. Check Whisper/LLM availability."
+                target_channel, "Reprocess timed out. Check ASR/LLM availability."
             )
             await ctx.followup.send("Reprocess timed out.", ephemeral=True)
         except Exception as exc:
@@ -2715,6 +3180,12 @@ def build_bot(settings: Settings) -> commands.Bot:
         await ctx.defer(ephemeral=True)
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.sidecar_managed:
+            await ctx.followup.send(
+                "Reconnect is managed by voice sidecar in current mode.",
+                ephemeral=True,
+            )
+            return
         target_channel: VoiceLikeChannel | None = None
         if state.voice_channel_id is not None:
             target_channel = _as_voice_like(
@@ -2910,6 +3381,12 @@ def build_bot(settings: Settings) -> commands.Bot:
                 "Recording already running for this guild.", ephemeral=True
             )
             return
+        if state.sidecar_managed:
+            await ctx.followup.send(
+                "Recording already running for this guild (sidecar mode).",
+                ephemeral=True,
+            )
+            return
         if state.processing:
             await ctx.followup.send(
                 "Previous recording is still processing.", ephemeral=True
@@ -2947,6 +3424,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.session_dir = None
         state.persisted_segments = 0
         state.restart_in_progress = False
+        state.sidecar_managed = False
+        state.sidecar_backend = ""
         state.rotation_triggered = 0
         state.rotation_resumed = 0
         state.rotation_failed = 0
@@ -2974,6 +3453,83 @@ def build_bot(settings: Settings) -> commands.Bot:
             segment_count=0,
             finalizing=False,
         )
+
+        # Optional sidecar path (for DAVE-capable runtime split).
+        # In this mode, Python bot does not connect to Discord voice directly.
+        if sidecar_client is not None:
+            try:
+                response = await sidecar_client.start_session(
+                    {
+                        "guild_id": ctx.guild.id,
+                        "voice_channel_id": voice_channel.id,
+                        "text_channel_id": getattr(ctx.channel, "id", 0),
+                        "requested_by": getattr(ctx.user, "id", 0),
+                        "campaign_id": state.campaign_id,
+                        "campaign_name": state.campaign_name,
+                        "summary_language": state.summary_language,
+                        "session_context": state.session_context,
+                        "name_hints": state.name_hints,
+                        "session_id": state.session_id,
+                    }
+                )
+                session_payload = response.get("session", {})
+                state.sidecar_managed = True
+                state.sidecar_backend = str(session_payload.get("backend", "sidecar"))
+                state.session_id = str(
+                    session_payload.get("session_id", state.session_id)
+                )
+                session_dir_payload = str(
+                    session_payload.get("session_dir", "")
+                ).strip()
+                if session_dir_payload:
+                    candidate = Path(session_dir_payload)
+                    if candidate.exists():
+                        state.session_dir = candidate
+                state.voice_channel_id = voice_channel.id
+                state.fallback_channel = ctx.channel
+                state.rotation_task = asyncio.create_task(
+                    sidecar_rotation_loop(ctx.guild.id, ctx.channel)
+                )
+                upsert_active_session(
+                    ctx.guild.id,
+                    status="recording",
+                    voice_channel_id=voice_channel.id,
+                    chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+                    segment_count=int(session_payload.get("segments_written", 0)) + 1,
+                    finalizing=False,
+                )
+                start_message = (
+                    f"Recording started in {voice_channel.mention} via sidecar API."
+                )
+                if auto_notes:
+                    start_message += "\n" + "\n".join(
+                        f"- {note}" for note in auto_notes
+                    )
+                if state.sidecar_backend == "skeleton":
+                    start_message += "\n- Sidecar backend is `skeleton` (control API only, no audio capture yet)."
+                await ctx.followup.send(start_message, ephemeral=True)
+                return
+            except Exception as exc:
+                logger.exception(
+                    "[session] sidecar_start_failed guild_id=%s", ctx.guild.id
+                )
+                state.finalizing = False
+                state.started_at_utc = None
+                state.voice_channel_id = None
+                state.session_id = ""
+                state.session_dir = None
+                state.persisted_segments = 0
+                state.restart_in_progress = False
+                state.sidecar_managed = False
+                state.sidecar_backend = ""
+                state.done_callback = None
+                state.fallback_channel = None
+                stop_background_tasks(state)
+                clear_active_session(ctx.guild.id)
+                await ctx.followup.send(
+                    f"Could not start sidecar recording: `{exc}`", ephemeral=True
+                )
+                return
 
         async def on_finished(
             finished_sink: discord.sinks.Sink,
@@ -3112,14 +3668,14 @@ def build_bot(settings: Settings) -> commands.Bot:
 
                 sent = await try_send(
                     target_channel,
-                    "Processing recording: Whisper transcription + local LLM summary...",
+                    "Processing recording: ASR transcription + local LLM summary...",
                 )
                 if (not sent) and not same_messageable(
                     target_channel, fallback_channel
                 ):
                     await try_send(
                         fallback_channel,
-                        "Processing recording: Whisper transcription + local LLM summary...",
+                        "Processing recording: ASR transcription + local LLM summary...",
                     )
                 logger.info(
                     "[session] processing_begin guild_id=%s segments=%s campaign_id=%s language=%s timeout_s=%s",
@@ -3235,7 +3791,7 @@ def build_bot(settings: Settings) -> commands.Bot:
                 )
                 await try_send(
                     fallback_channel,
-                    "Processing timed out. Check Whisper/LLM availability and bot logs.",
+                    "Processing timed out. Check ASR/LLM availability and bot logs.",
                 )
             except Exception as exc:
                 sent = await try_send(
@@ -3261,6 +3817,8 @@ def build_bot(settings: Settings) -> commands.Bot:
                 state.summary_language = "ru"
                 state.session_context = ""
                 state.name_hints = ""
+                state.sidecar_managed = False
+                state.sidecar_backend = ""
                 stop_background_tasks(state)
                 clear_active_session(guild_id)
                 guild = bot.get_guild(guild_id)
@@ -3268,7 +3826,9 @@ def build_bot(settings: Settings) -> commands.Bot:
                     await guild.voice_client.disconnect(force=False)
 
         try:
-            voice_client = await connect_voice_with_retry(ctx.guild, voice_channel)
+            voice_client = await connect_voice_with_retry(
+                ctx.guild, voice_channel, attempts=1
+            )
 
             sink = discord.sinks.WaveSink()
             state.sink = sink
@@ -3300,6 +3860,32 @@ def build_bot(settings: Settings) -> commands.Bot:
                 segment_count=state.persisted_segments + 1,
                 finalizing=False,
             )
+        except VoiceE2EERequiredError:
+            state.sink = None
+            state.voice_channel_id = None
+            state.finalizing = False
+            state.started_at_utc = None
+            state.session_id = ""
+            state.session_dir = None
+            state.persisted_segments = 0
+            state.restart_in_progress = False
+            state.done_callback = None
+            state.fallback_channel = None
+            stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
+            if ctx.guild.voice_client:
+                await ctx.guild.voice_client.disconnect(force=True)
+            await try_send(
+                ctx.channel,
+                "Recording cannot start: this voice channel requires Discord DAVE/E2EE, "
+                "which is not supported by the current bot voice stack.",
+            )
+            await ctx.followup.send(
+                "Could not start recording: Discord voice now requires DAVE/E2EE for this channel.\n"
+                "Current Python voice stack does not support it yet.",
+                ephemeral=True,
+            )
+            return
         except (RecordingException, RuntimeError) as exc:
             state.sink = None
             state.voice_channel_id = None
@@ -3359,6 +3945,160 @@ def build_bot(settings: Settings) -> commands.Bot:
             return
 
         state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.sidecar_managed and state.sink is None:
+            if sidecar_client is None:
+                state.sidecar_managed = False
+                state.sidecar_backend = ""
+                clear_active_session(ctx.guild.id)
+                await ctx.respond(
+                    "No active recording in current runtime.", ephemeral=True
+                )
+                return
+            state.finalizing = True
+            stop_background_tasks(state)
+            upsert_active_session(
+                ctx.guild.id,
+                status="finalizing",
+                voice_channel_id=state.voice_channel_id,
+                chronicle_channel_id=store.get_chronicle_channel(ctx.guild.id),
+                segment_count=state.persisted_segments,
+                finalizing=True,
+            )
+            write_session_checkpoint(state, ctx.guild.id, status="finalizing")
+            try:
+                stop_response = await sidecar_client.stop_session(
+                    ctx.guild.id, reason="manual"
+                )
+            except Exception as exc:
+                state.finalizing = False
+                await ctx.respond(
+                    f"Could not stop sidecar recording: `{exc}`", ephemeral=True
+                )
+                return
+
+            session_payload = stop_response.get("session", {})
+            sidecar_segments = int(session_payload.get("segments_written", 0))
+            state.persisted_segments = max(state.persisted_segments, sidecar_segments)
+            state.sidecar_managed = False
+            state.processing = True
+            target_channel: discord.abc.Messageable = ctx.channel
+            chronicle_channel_id = store.get_chronicle_channel(ctx.guild.id)
+            if chronicle_channel_id is not None:
+                maybe = ctx.guild.get_channel(chronicle_channel_id)
+                if isinstance(maybe, discord.TextChannel):
+                    target_channel = maybe
+
+            await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
+
+            async def _finalize_sidecar_processing() -> None:
+                try:
+                    if state.persisted_segments <= 0 or state.session_dir is None:
+                        await try_send(
+                            target_channel,
+                            "Recording finished, but no audio data was captured.",
+                        )
+                        return
+
+                    await try_send(
+                        target_channel,
+                        "Processing recording: ASR transcription + local LLM summary...",
+                    )
+                    live_task = state.live_transcribe_task
+                    if live_task is not None and not live_task.done():
+                        logger.info(
+                            "[sidecar-live-asr] awaiting in-flight task before final reprocess guild_id=%s",
+                            ctx.guild.id,
+                        )
+                        try:
+                            await live_task
+                        except Exception:
+                            logger.exception(
+                                "[sidecar-live-asr] in-flight task failed before final reprocess guild_id=%s",
+                                ctx.guild.id,
+                            )
+                        finally:
+                            state.live_transcribe_task = None
+                    logger.info(
+                        "[session] sidecar_processing_begin guild_id=%s session_dir=%s segments=%s campaign_id=%s language=%s timeout_s=%s",
+                        ctx.guild.id,
+                        state.session_dir,
+                        state.persisted_segments,
+                        state.campaign_id,
+                        state.summary_language,
+                        settings.processing_timeout_seconds,
+                    )
+                    artifacts = await asyncio.wait_for(
+                        processor.reprocess_saved_session(
+                            session_dir=state.session_dir,
+                            summary_language=state.summary_language,
+                            session_context=state.session_context,
+                            name_hints=state.name_hints,
+                            campaign_id=state.campaign_id,
+                            campaign_name=state.campaign_name,
+                        ),
+                        timeout=settings.processing_timeout_seconds,
+                    )
+                    await try_send(
+                        target_channel, f"Session saved: `{artifacts.session_dir}`"
+                    )
+                    await try_send_file(
+                        target_channel,
+                        str(artifacts.full_transcript_txt_path),
+                        content="## Full Transcript (attached as .txt)",
+                    )
+                    if (
+                        artifacts.mixed_audio_path
+                        and artifacts.mixed_audio_path.exists()
+                    ):
+                        await try_send_file(
+                            target_channel,
+                            str(artifacts.mixed_audio_path),
+                            content="## Mixed Session Audio (.mp3)",
+                        )
+                    await try_send(target_channel, "## AI Session Summary")
+                    await send_long(target_channel, artifacts.summary_markdown)
+                    quality_report = await build_quality_report(
+                        state, artifacts.speaker_transcripts
+                    )
+                    await try_send(target_channel, quality_report)
+                except TimeoutError:
+                    logger.warning(
+                        "[session] sidecar_processing_timeout guild_id=%s timeout_s=%s",
+                        ctx.guild.id,
+                        settings.processing_timeout_seconds,
+                    )
+                    await try_send(
+                        target_channel,
+                        "Processing timed out. Check ASR/LLM availability and bot logs.",
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "[session] sidecar_processing_failed guild_id=%s", ctx.guild.id
+                    )
+                    await try_send(
+                        target_channel, f"Error while processing recording: `{exc}`"
+                    )
+                finally:
+                    state.processing = False
+                    state.finalizing = False
+                    state.sidecar_backend = ""
+                    state.voice_channel_id = None
+                    state.started_at_utc = None
+                    state.session_id = ""
+                    state.session_dir = None
+                    state.persisted_segments = 0
+                    state.done_callback = None
+                    state.fallback_channel = None
+                    state.campaign_id = ""
+                    state.campaign_name = ""
+                    state.summary_language = "ru"
+                    state.session_context = ""
+                    state.name_hints = ""
+                    clear_active_session(ctx.guild.id)
+
+            asyncio.create_task(_finalize_sidecar_processing())
+            return
+
         voice_client = ctx.guild.voice_client
         if voice_client is None or state.sink is None:
             await ctx.respond("No active recording.", ephemeral=True)
@@ -3374,18 +4114,60 @@ def build_bot(settings: Settings) -> commands.Bot:
             finalizing=True,
         )
         write_session_checkpoint(state, ctx.guild.id, status="finalizing")
-        voice_client.stop_recording()
+        try:
+            voice_client.stop_recording()
+        except RecordingException:
+            state.finalizing = False
+            state.sink = None
+            stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
+            await ctx.respond(
+                "Recording is not active (voice connection likely failed). "
+                "Use `/chronicle_start` to start a new recording.",
+                ephemeral=True,
+            )
+            return
         await ctx.respond("Recording stopped. Processing started.", ephemeral=True)
 
     @bot.slash_command(
         name="chronicle_leave", description="Disconnect bot from voice channel"
     )
     async def chronicle_leave(ctx: discord.ApplicationContext) -> None:
-        if ctx.guild is None or ctx.guild.voice_client is None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can be used only in a server.", ephemeral=True
+            )
+            return
+        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
+        if state.sidecar_managed and state.sink is None:
+            if sidecar_client is not None:
+                try:
+                    await sidecar_client.stop_session(ctx.guild.id, reason="leave")
+                except Exception:
+                    logger.exception(
+                        "[session] sidecar_stop_on_leave_failed guild_id=%s",
+                        ctx.guild.id,
+                    )
+            state.sidecar_managed = False
+            state.sidecar_backend = ""
+            state.finalizing = False
+            state.voice_channel_id = None
+            state.started_at_utc = None
+            state.session_id = ""
+            state.session_dir = None
+            state.persisted_segments = 0
+            state.restart_in_progress = False
+            state.done_callback = None
+            state.fallback_channel = None
+            stop_background_tasks(state)
+            clear_active_session(ctx.guild.id)
+            await ctx.respond("Sidecar recording context cleared.", ephemeral=True)
+            return
+
+        if ctx.guild.voice_client is None:
             await ctx.respond("Bot is not in a voice channel.", ephemeral=True)
             return
         await ctx.guild.voice_client.disconnect(force=False)
-        state = guild_state.setdefault(ctx.guild.id, GuildRecordingState())
         state.sink = None
         state.finalizing = False
         state.voice_channel_id = None
@@ -3394,6 +4176,8 @@ def build_bot(settings: Settings) -> commands.Bot:
         state.session_dir = None
         state.persisted_segments = 0
         state.restart_in_progress = False
+        state.sidecar_managed = False
+        state.sidecar_backend = ""
         state.done_callback = None
         state.fallback_channel = None
         stop_background_tasks(state)

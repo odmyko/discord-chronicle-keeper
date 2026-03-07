@@ -4,8 +4,14 @@
 *.pyd
 .venv/
 .venv-win/
+.venv*/
+.qwen3-asr-src/
+voice_sidecar/node_modules/
+out_qwen_*.json
+output.txt
 .env
 .env.*
 !.env.example
 data/
 .pytest_cache/
+.pre-commit-cache/

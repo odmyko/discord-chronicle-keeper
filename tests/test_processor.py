@@ -5,19 +5,11 @@ from chronicle_keeper.processor import (
     SpeakerTranscript,
     sanitize_name,
 )
-from chronicle_keeper.whisper_client import TranscriptSegment
 
 
 def test_sanitize_name():
     assert sanitize_name(" John Galt ") == "John_Galt"
-    assert sanitize_name("Имя!?") == "unknown"
-
-
-def test_split_transcript_for_summary():
-    text = "line1\n" * 500
-    chunks = SessionProcessor._split_transcript_for_summary(text, max_chars=200)
-    assert len(chunks) > 1
-    assert all(len(c) <= 210 for c in chunks)
+    assert sanitize_name("РРјСЏ!?") == "unknown"
 
 
 def test_build_transcript_text():
@@ -35,93 +27,44 @@ def test_build_transcript_text():
             transcript="world",
         ),
     ]
-    result = SessionProcessor._build_transcript_text(items, [])
+    result = SessionProcessor._build_transcript_text(items)
     assert "alice (1)" in result
     assert "bob (2)" in result
 
 
-def test_clean_transcript_text_removes_common_whisper_hallucinations():
-    source = (
-        "Субтитры создавал DimaTorzok Продолжение следует... "
-        "Редактор субтитров А.Семкин Корректор А.Кулакова "
-        "Игрок открывает дверь и зовет остальных."
-    )
+def test_clean_transcript_text_removes_common_hallucinations():
+    source = "DimaTorzok Игрок открывает дверь и зовет остальных."
 
     cleaned = SessionProcessor._clean_transcript_text(source)
 
     assert "DimaTorzok" not in cleaned
-    assert "Продолжение следует" not in cleaned
-    assert "Корректор" not in cleaned
     assert "Игрок открывает дверь" in cleaned
 
 
 def test_clean_transcript_text_removes_standalone_torzok_noise():
-    source = (
-        "ДимаTorzok DimaTorzok Dima Torzok Добавил субтитры DimaTorzok "
-        "Игроки вскрывают дверь и спорят с дуэргарами."
-    )
+    source = "DimaTorzok Dima Torzok Игроки вскрывают дверь и спорят с дуэргарами."
 
     cleaned = SessionProcessor._clean_transcript_text(source)
 
-    assert "Torzok" not in cleaned
+    assert "DimaTorzok" not in cleaned
+    assert "Dima Torzok" not in cleaned
     assert "Игроки вскрывают дверь" in cleaned
 
 
 def test_clean_transcript_text_collapses_repeated_short_phrases():
-    source = "Спасибо. Спасибо. Спасибо. Спасибо. Окей. и и и и и"
+    source = "РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РЎРїР°СЃРёР±Рѕ. РћРєРµР№. Рё Рё Рё Рё Рё"
 
     cleaned = SessionProcessor._clean_transcript_text(source)
 
-    assert cleaned == "Спасибо. Окей. и"
+    assert cleaned == "РЎРїР°СЃРёР±Рѕ. РћРєРµР№. Рё"
 
 
 def test_clean_transcript_text_keeps_double_repeats():
-    source = "Да. Да. Потом идем дальше."
+    source = "Р”Р°. Р”Р°. РџРѕС‚РѕРј РёРґРµРј РґР°Р»СЊС€Рµ."
 
     cleaned = SessionProcessor._clean_transcript_text(source)
 
-    assert cleaned == "Да. Да. Потом идем дальше."
-
-
-def test_timeline_entries_from_segments_drop_cleaned_noise():
-    segments = [
-        TranscriptSegment(start=0.0, end=1.0, text="Продолжение следует..."),
-        TranscriptSegment(start=1.0, end=2.0, text="Игрок наносит удар."),
-    ]
-    cleaned_segments = [
-        TranscriptSegment(start=s.start, end=s.end, text=cleaned)
-        for s in segments
-        if (cleaned := SessionProcessor._clean_transcript_text(s.text))
-    ]
-
-    entries = SessionProcessor._timeline_entries_from_segments(
-        cleaned_segments,
-        segment_index=1,
-        user_id=1,
-        speaker_name="alice",
-    )
-
-    assert len(entries) == 1
-    assert entries[0].text == "Игрок наносит удар."
-
-
-def test_timeline_entries_from_segments_collapse_triple_repeats():
-    segments = [
-        TranscriptSegment(start=0.0, end=1.0, text="Спасибо."),
-        TranscriptSegment(start=1.0, end=2.0, text="Спасибо."),
-        TranscriptSegment(start=2.0, end=3.0, text="Спасибо."),
-        TranscriptSegment(start=3.0, end=4.0, text="Спасибо."),
-        TranscriptSegment(start=4.0, end=5.0, text="Идем дальше."),
-    ]
-
-    entries = SessionProcessor._timeline_entries_from_segments(
-        segments,
-        segment_index=1,
-        user_id=1,
-        speaker_name="alice",
-    )
-
-    assert [entry.text for entry in entries] == ["Спасибо.", "Идем дальше."]
+    assert cleaned == "Р”Р°. Р”Р°. РџРѕС‚РѕРј РёРґРµРј РґР°Р»СЊС€Рµ."
 
 
 def test_parse_saved_audio_filename():

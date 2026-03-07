@@ -2,48 +2,56 @@
 
 ## Overview
 
-Discord Chronicle Keeper processes sessions with a local-first pipeline:
+Discord Chronicle Keeper is a local-first pipeline:
 
-1. Bot records per-speaker audio from a Discord voice channel.
-2. Audio is compressed to MP3 and stored in `data/sessions/<guild>/<session>/audio`.
-3. Whisper ASR produces per-speaker transcripts and timeline segments.
-4. Full transcript is assembled and summarized by a local OpenAI-compatible LLM.
-5. Artifacts are published to the configured Discord text channel and persisted on disk.
+1. Bot records per-speaker audio from Discord voice receive.
+2. Audio chunks are stored in `data/sessions/<guild>/<session>/audio`.
+3. Qwen3-ASR (local Python inference) generates transcript segments.
+4. Session processor builds transcript artifacts.
+5. Local OpenAI-compatible LLM generates summary and chronicle post.
+6. Bot posts results to Discord text channel and keeps artifacts on disk.
 
 ## Runtime Components
 
-- `bot` service:
-  - Discord slash commands and voice recording control
-  - orchestration for processing, retries, recovery, retention
-- Whisper backend (choose one):
-  - `whisper` (`/asr` style, onerahmet image)
-  - `whisper_vllm` (`/v1/audio/transcriptions` style)
-- LLM backend:
-  - Docker Model Runner model (`ai/gpt-oss:20B-MXFP4`) or any compatible endpoint
+- `bot` (default compose service):
+  - Discord slash commands
+  - voice recording + reconnect/rotation logic
+  - transcription + summarization orchestration
+- `bot_docker_llm` (compose profile `docker-llm`):
+  - same bot code, but LLM endpoint comes from Docker model runner
+- `voice_sidecar` (compose profile `voice-sidecar`, draft):
+  - Node control API scaffold for future voice runtime split
+  - current phase is contract only; no audio capture yet
+- ASR runtime:
+  - local Qwen3-ASR via Python (`QWEN3_ASR_*` env)
+
+See contract: `docs/voice-sidecar-contract.md`.
 
 ## Processing Flow
 
-1. `/chronicle_start` starts voice capture.
-2. `/chronicle_stop` finalizes recording and triggers processing.
-3. Session processor:
-  - writes checkpoint state (`processing_state.json`)
-  - transcribes tracks
-  - builds `full_transcript.md` and `full_transcript.txt`
-  - generates chunk summaries and final summary
-4. Bot publishes summary and artifacts.
+1. `/chronicle_start` starts recording for active campaign.
+2. Bot writes speaker chunks to disk and rotates by `RECORDING_ROTATION_SECONDS`.
+3. `/chronicle_stop` finalizes current session and starts processing.
+4. Processor:
+   - updates `processing_state.json`
+   - transcribes audio
+   - builds `full_transcript.md` and `full_transcript.txt`
+   - generates chunk summaries and final `summary.md`
+5. Bot posts summary and available artifacts to chronicle channel.
 
 ## Reliability Features
 
-- segment rotation (`RECORDING_ROTATION_SECONDS`)
+- voice reconnect monitor + manual `/chronicle_reconnect`
+- decode-burst guard with forced rollover/reconnect
+- recording rotation with resume attempt
 - startup recovery for unfinished sessions
-- `reprocess` command from saved artifacts
-- optional Whisper fallback endpoint
-- config doctor warnings on startup
+- reprocess commands from saved artifacts
+- startup config doctor warnings for obvious misconfigurations
 
 ## Data Layout
 
-- `data/guild_settings.json`: per-guild channel/language config
-- `data/runtime/active_sessions.json`: active session runtime state
+- `data/guild_settings.json`: guild/campaign settings
+- `data/runtime/active_sessions.json`: live runtime session registry
 - `data/sessions/<guild>/<session>/`:
   - `audio/`
   - `transcripts/`
