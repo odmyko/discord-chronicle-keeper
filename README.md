@@ -13,6 +13,7 @@ Pick one path first, then follow only that section:
 1. Local Python app + local Qwen ASR + external LLM endpoint.
 2. Docker Compose + LM Studio (default bot service, no Docker LLM model).
 3. Docker Compose + Docker model runner (`docker-llm` profile, no LM Studio required).
+4. Optional: run Node voice sidecar skeleton (`voice-sidecar` profile, control API only).
 
 ## Quickstart (5 min, Local Python Mode)
 
@@ -155,6 +156,8 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
 - Recommended long-session preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`.
 - Keep `AUDIO_VAD_ENABLED=false` for the first pass unless you specifically need silence trimming.
+- Optional sidecar routing (draft): `VOICE_SIDECAR_ENABLED=true` with `VOICE_SIDECAR_BASE_URL=http://127.0.0.1:8081` and shared `SIDECAR_TOKEN`.
+- Optional live ASR in sidecar mode: `LIVE_CHUNK_TRANSCRIBE_ON_ROTATION=true` (incremental ASR kicks in after each rotation, so final stop is mostly summary work).
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
 - Extra compact preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=6`.
 - Voice decode burst guard (auto recovery for repeated decode failures):
@@ -321,6 +324,8 @@ ASR_DTYPE=float16
 This repo includes compose services for both LLM modes:
 - `bot` (default): Discord Chronicle Keeper + external LM Studio endpoint
 - `bot_docker_llm` (`docker-llm` profile): Discord Chronicle Keeper + Docker model runner
+- `bot_sidecar` (`voice-sidecar` profile): bot preconfigured for sidecar mode (`VOICE_SIDECAR_ENABLED=true`)
+- `voice_sidecar` (`voice-sidecar` profile): Node voice runtime + control API
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
 Start stack with LM Studio (default LLM backend):
@@ -353,6 +358,25 @@ Stop:
 docker compose down
 ```
 
+Start only sidecar runtime/API (for contract/integration testing):
+
+```bash
+docker compose --profile voice-sidecar up -d --build
+curl http://127.0.0.1:8081/health
+```
+
+Smoke sidecar contract (health/start/status/rotate/stop):
+
+```bash
+python scripts/smoke_sidecar.py --base-url http://127.0.0.1:8081
+```
+
+Manual sidecar E2E (real voice capture to WAV):
+
+```bash
+python scripts/smoke_sidecar_e2e.py --base-url http://127.0.0.1:8081 --guild-id <guild_id> --voice-channel-id <voice_channel_id> --rotate-once
+```
+
 Notes:
 - Compose model injection sets:
   - `LLM_BASE_URL` (endpoint URL)
@@ -360,6 +384,14 @@ Notes:
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
+- Sidecar contract (draft): `docs/voice-sidecar-contract.md`.
+
+Sidecar + bot mode (draft path, with health-gated startup):
+
+```bash
+docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
+```
+(`bot_sidecar` waits for healthy `voice_sidecar`; `--scale bot=0` disables default bot to avoid duplicate Discord login.)
 
 ### Smoke E2E (ASR + LLM)
 
@@ -535,6 +567,38 @@ Summary-only mode (reuse existing transcripts, refresh only `summary.md`):
 
 ```bash
 python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --language ru --summary-only
+```
+
+Transcribe-only mode (incremental by default, no summary generation):
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --transcribe-only
+```
+
+Force full retranscription in transcribe-only mode:
+
+```bash
+python -m chronicle_keeper.reprocess --session-dir data/sessions/<guild_id>/<session_id> --transcribe-only --force-transcribe
+```
+
+## Local Smoke Test Without Discord
+
+You can test full ASR+summary pipeline locally (no Discord join/start needed):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --language ru
+```
+
+To emulate rotation (split source into chunk-like segments first):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --segment-seconds 60 --language ru
+```
+
+To explicitly test split flow (transcribe-only then summary-only):
+
+```bash
+python scripts/smoke_local_pipeline.py --audio <path_to_audio_file> --mode split --segment-seconds 60 --language ru
 ```
 
 ## Repost Saved Artifacts To Discord (CLI)

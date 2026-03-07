@@ -58,6 +58,11 @@ class Settings:
     voice_decode_burst_window_seconds: int
     voice_decode_burst_threshold: int
     voice_decode_burst_cooldown_seconds: int
+    voice_sidecar_enabled: bool
+    voice_sidecar_base_url: str
+    voice_sidecar_token: str
+    voice_sidecar_timeout_seconds: float
+    live_chunk_transcribe_on_rotation: bool
     data_dir: Path
 
 
@@ -228,6 +233,20 @@ def load_settings() -> Settings:
         voice_decode_burst_cooldown_seconds=max(
             5, int(os.getenv("VOICE_DECODE_BURST_COOLDOWN_SECONDS", "60"))
         ),
+        voice_sidecar_enabled=_as_bool(
+            os.getenv("VOICE_SIDECAR_ENABLED", "false"), default=False
+        ),
+        voice_sidecar_base_url=(
+            os.getenv("VOICE_SIDECAR_BASE_URL", "http://127.0.0.1:8081").strip()
+        ).rstrip("/"),
+        voice_sidecar_token=os.getenv("SIDECAR_TOKEN", "").strip(),
+        voice_sidecar_timeout_seconds=max(
+            1.0, float(os.getenv("VOICE_SIDECAR_TIMEOUT_SECONDS", "30"))
+        ),
+        live_chunk_transcribe_on_rotation=_as_bool(
+            os.getenv("LIVE_CHUNK_TRANSCRIBE_ON_ROTATION", "false"),
+            default=False,
+        ),
         data_dir=Path(os.getenv("DATA_DIR", "./data")),
     )
 
@@ -253,4 +272,6 @@ def config_doctor_issues(settings: Settings) -> list[str]:
         issues.append("ASR_DTYPE must be one of: auto, bfloat16, float16, float32.")
     if settings.lmstudio_auto_load and not settings.lmstudio_control_base_url:
         issues.append("LMSTUDIO_AUTO_LOAD=true but LMSTUDIO_CONTROL_BASE_URL is empty.")
+    if settings.voice_sidecar_enabled and not settings.voice_sidecar_base_url:
+        issues.append("VOICE_SIDECAR_ENABLED=true but VOICE_SIDECAR_BASE_URL is empty.")
     return issues

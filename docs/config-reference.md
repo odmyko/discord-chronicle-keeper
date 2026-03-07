@@ -65,6 +65,13 @@ This project is configured via `.env`.
 - `VOICE_DECODE_BURST_THRESHOLD`
 - `VOICE_DECODE_BURST_COOLDOWN_SECONDS`
 
+## Voice sidecar (optional, draft path)
+
+- `VOICE_SIDECAR_ENABLED`: if `true`, `/chronicle_start` and `/chronicle_stop` use sidecar API instead of Python voice receive
+- `VOICE_SIDECAR_BASE_URL`: sidecar base URL (default `http://127.0.0.1:8081`)
+- `VOICE_SIDECAR_TIMEOUT_SECONDS`: sidecar request timeout
+- `SIDECAR_TOKEN`: optional auth token sent as `X-Sidecar-Token`
+
 ## Audio processing
 
 - `AUDIO_DUAL_PIPELINE_ENABLED`

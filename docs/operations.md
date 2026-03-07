@@ -6,6 +6,7 @@ LLM mode only (ASR is always local Qwen3-ASR in current build):
 
 1. `bot` + LM Studio/external OpenAI-compatible endpoint (default)
 2. `bot_docker_llm` + Docker model runner (`docker-llm` profile)
+3. Optional `bot_sidecar` + `voice_sidecar` (`voice-sidecar` profile)
 
 ## Start
 
@@ -20,6 +21,24 @@ Docker model runner:
 ```bash
 docker compose --profile docker-llm up -d --build --remove-orphans --scale bot=0
 ```
+
+Sidecar only (no bot):
+
+```bash
+docker compose --profile voice-sidecar up -d --build --scale bot=0 --scale bot_sidecar=0
+curl http://127.0.0.1:8081/health
+```
+
+Bot + sidecar together (draft runtime split):
+
+```bash
+docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
+```
+(This uses `bot_sidecar` with sidecar env preconfigured and health-gated startup.)
+
+Runtime note:
+- With sidecar mode enabled, bot startup syncs active recording state from sidecar API
+  (fallback: `data/runtime/voice_sidecar_state.json`) and restores rotation loop metadata.
 
 ## Stop
 
@@ -66,6 +85,13 @@ Docker model runner mode:
 
 ```bash
 docker compose logs -f bot_docker_llm
+```
+
+Sidecar mode:
+
+```bash
+docker compose logs -f voice_sidecar
+docker compose logs -f bot_sidecar
 ```
 
 ## Cleanup and retention

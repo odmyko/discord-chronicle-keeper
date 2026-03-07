@@ -558,17 +558,10 @@ class SessionProcessor:
         audio_subdir: str | None = None,
     ) -> SessionArtifacts:
         reprocess_started = time.perf_counter()
-        selected_audio_subdir = (audio_subdir or "").strip()
-        if selected_audio_subdir:
-            audio_dir = session_dir / selected_audio_subdir
-        else:
-            preferred_vad_dir = session_dir / "audio_vad"
-            if self._audio_vad_enabled and preferred_vad_dir.exists():
-                audio_dir = preferred_vad_dir
-                selected_audio_subdir = "audio_vad"
-            else:
-                audio_dir = session_dir / "audio"
-                selected_audio_subdir = "audio"
+        audio_dir, selected_audio_subdir = self._resolve_audio_dir_for_reprocess(
+            session_dir=session_dir,
+            audio_subdir=audio_subdir,
+        )
         transcript_dir = session_dir / "transcripts"
         checkpoint_path = session_dir / "processing_state.json"
         if not audio_dir.exists() or not audio_dir.is_dir():
@@ -745,6 +738,124 @@ class SessionProcessor:
             speaker_transcripts=speaker_items,
             mixed_audio_path=mixed_audio_path,
         )
+
+    def _resolve_audio_dir_for_reprocess(
+        self, *, session_dir: Path, audio_subdir: str | None
+    ) -> tuple[Path, str]:
+        selected_audio_subdir = (audio_subdir or "").strip()
+        if selected_audio_subdir:
+            audio_dir = session_dir / selected_audio_subdir
+        else:
+            preferred_vad_dir = session_dir / "audio_vad"
+            if self._audio_vad_enabled and preferred_vad_dir.exists():
+                audio_dir = preferred_vad_dir
+                selected_audio_subdir = "audio_vad"
+            else:
+                audio_dir = session_dir / "audio"
+                selected_audio_subdir = "audio"
+        return audio_dir, selected_audio_subdir
+
+    async def transcribe_saved_session_incremental(
+        self,
+        *,
+        session_dir: Path,
+        audio_subdir: str | None = None,
+        force: bool = False,
+    ) -> tuple[int, int]:
+        audio_dir, selected_audio_subdir = self._resolve_audio_dir_for_reprocess(
+            session_dir=session_dir,
+            audio_subdir=audio_subdir,
+        )
+        transcript_dir = session_dir / "transcripts"
+        if not audio_dir.exists() or not audio_dir.is_dir():
+            raise RuntimeError(f"Session audio directory not found: {audio_dir}")
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        entries = self._collect_saved_audio_entries(audio_dir)
+        if not entries:
+            raise RuntimeError(f"No supported audio files found in {audio_dir}")
+
+        processed = 0
+        total = len(entries)
+        speaker_transcript_chunks: OrderedDict[tuple[int, str], list[str]] = (
+            OrderedDict()
+        )
+        for entry in entries:
+            transcript_path = transcript_dir / f"{entry.path.stem}.md"
+            transcript = ""
+            if transcript_path.exists() and not force:
+                transcript = transcript_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ).strip()
+            else:
+                asr_started = time.perf_counter()
+                transcript_result = await self._asr.transcribe_file_detailed(entry.path)
+                self._observe_metric("asr_transcribe", asr_started, True)
+                transcript = self._clean_transcript_text(transcript_result.text)
+                if not transcript:
+                    cleaned_segments = [
+                        self._clean_transcript_text(seg.text)
+                        for seg in transcript_result.segments
+                    ]
+                    cleaned_segments = [seg for seg in cleaned_segments if seg]
+                    if cleaned_segments:
+                        transcript = " ".join(cleaned_segments).strip()
+                transcript_path.write_text(
+                    transcript or "_[no speech detected]_", encoding="utf-8"
+                )
+                processed += 1
+            key = (entry.user_id, entry.speaker_name)
+            speaker_transcript_chunks.setdefault(key, []).append(
+                transcript or "_[no speech detected]_"
+            )
+
+        merged_items: list[SpeakerTranscript] = []
+        for (user_id, speaker_name), chunks in speaker_transcript_chunks.items():
+            merged_items.append(
+                SpeakerTranscript(
+                    user_id=user_id,
+                    speaker_name=speaker_name,
+                    audio_path=Path(""),
+                    transcript="\n\n".join(chunks).strip(),
+                )
+            )
+        merged_items.sort(key=lambda item: item.speaker_name.lower())
+        full_transcript = self._build_transcript_markdown(merged_items)
+        (session_dir / "full_transcript.md").write_text(
+            full_transcript, encoding="utf-8"
+        )
+        full_transcript_txt = self._build_transcript_text(merged_items)
+        (session_dir / "full_transcript.txt").write_text(
+            full_transcript_txt, encoding="utf-8"
+        )
+        checkpoint_path = session_dir / "processing_state.json"
+        checkpoint: dict = {}
+        if checkpoint_path.exists():
+            try:
+                loaded = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    checkpoint = loaded
+            except Exception:
+                checkpoint = {}
+        checkpoint.update(
+            {
+                "status": "transcribing"
+                if processed > 0
+                else checkpoint.get("status", ""),
+                "segments_total": total,
+                "persisted_segments": total,
+                "total_tracks": total,
+                "audio_source_subdir": selected_audio_subdir,
+            }
+        )
+        self._write_checkpoint(checkpoint_path, checkpoint)
+        logger.info(
+            "[reprocess] incremental_transcribe session_dir=%s processed=%s total=%s audio_subdir=%s",
+            session_dir,
+            processed,
+            total,
+            selected_audio_subdir,
+        )
+        return processed, total
 
     async def resummarize_saved_session(
         self,

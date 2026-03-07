@@ -27,6 +27,51 @@ services:
         endpoint_var: LLM_BASE_URL
         model_var: LLM_MODEL
 
+  bot_sidecar:
+    <<: *bot-common
+    profiles: ["voice-sidecar"]
+    depends_on:
+      voice_sidecar:
+        condition: service_healthy
+    environment:
+      DATA_DIR: /app/data
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
+      VOICE_SIDECAR_ENABLED: "true"
+      VOICE_SIDECAR_BASE_URL: http://voice_sidecar:8081
+      VOICE_SIDECAR_TIMEOUT_SECONDS: ${VOICE_SIDECAR_TIMEOUT_SECONDS:-30}
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:-}
+
+  voice_sidecar:
+    build:
+      context: ./voice_sidecar
+      dockerfile: Dockerfile
+    image: chronicle-voice-sidecar:latest
+    profiles: ["voice-sidecar"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      SIDECAR_PORT: 8081
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 models:
   llm:
     model: ai/gpt-oss:20B-MXFP4

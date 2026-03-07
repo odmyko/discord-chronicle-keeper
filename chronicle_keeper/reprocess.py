@@ -57,6 +57,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "(transcripts/*.md or full_transcript.md)."
         ),
     )
+    parser.add_argument(
+        "--transcribe-only",
+        action="store_true",
+        help=(
+            "Run ASR only (incremental by default) and regenerate transcript files "
+            "without creating summary.md."
+        ),
+    )
+    parser.add_argument(
+        "--force-transcribe",
+        action="store_true",
+        help="Re-transcribe all chunks even if transcript files already exist.",
+    )
     return parser
 
 
@@ -94,12 +107,29 @@ async def _run() -> int:
     )
 
     logger.info(
-        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s summary_only=%s",
+        "[reprocess-cli] start session_dir=%s language=%s audio_subdir=%s summary_only=%s transcribe_only=%s force_transcribe=%s",
         session_dir,
         args.language,
         (args.audio_subdir or "<auto>"),
         args.summary_only,
+        args.transcribe_only,
+        args.force_transcribe,
     )
+    if args.summary_only and args.transcribe_only:
+        raise RuntimeError("Use only one mode: --summary-only OR --transcribe-only.")
+    if args.transcribe_only:
+        processed, total = await processor.transcribe_saved_session_incremental(
+            session_dir=session_dir,
+            audio_subdir=(args.audio_subdir or None),
+            force=bool(args.force_transcribe),
+        )
+        logger.info(
+            "[reprocess-cli] transcribe-only done session_dir=%s processed=%s total=%s",
+            session_dir,
+            processed,
+            total,
+        )
+        return 0
     if args.summary_only:
         artifacts = await processor.resummarize_saved_session(
             session_dir=session_dir,
