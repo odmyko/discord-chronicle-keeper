@@ -13,7 +13,12 @@ Pick one path first, then follow only that section:
 1. Local Python app + local Qwen ASR + external LLM endpoint.
 2. Docker Compose + LM Studio (default bot service, no Docker LLM model).
 3. Docker Compose + Docker model runner (`docker-llm` profile, no LM Studio required).
-4. Optional: run Node voice sidecar skeleton (`voice-sidecar` profile, control API only).
+4. Bot + Node voice sidecar (`voice-sidecar` profile) for Discord DAVE/E2EE-compatible voice capture.
+
+Important:
+- DAVE/E2EE is **not enabled by default**.
+- Default local Python voice receive path can fail on DAVE-required voice channels (close code `4017`).
+- For DAVE-required channels, use sidecar mode.
 
 ## Quickstart (5 min, Local Python Mode)
 
@@ -51,6 +56,38 @@ python -m chronicle_keeper.bot
 - `/chronicle_start`
 - `/chronicle_stop`
 
+## Quickstart (DAVE/E2EE Channels, Recommended)
+
+If your voice channel requires DAVE/E2EE, run sidecar mode:
+
+```bash
+docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
+docker compose logs -f bot_sidecar
+```
+
+This starts:
+- `voice_sidecar` (Node voice runtime/control API)
+- `bot_sidecar` (Python bot configured with `VOICE_SIDECAR_ENABLED=true`)
+
+Stop:
+
+```bash
+docker compose --profile voice-sidecar down
+```
+
+GPU variant (NVIDIA):
+
+```bash
+docker compose --profile voice-sidecar-gpu up -d --build --remove-orphans --scale bot=0
+docker compose logs -f bot_sidecar_gpu
+```
+
+Quick GPU check inside bot container:
+
+```bash
+docker compose exec bot_sidecar_gpu python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+```
+
 ## Docs
 
 Additional practical documentation:
@@ -68,7 +105,7 @@ flowchart LR
   B --> C[Per-user Audio Segments mp3]
   C --> D[Qwen3-ASR]
   D --> E[Per-speaker Transcripts]
-  E --> F[Chunked + Hierarchical Summarization]
+  E --> F[Final Session Summary Generation]
   F --> G[Local LLM API]
   G --> H[Session Summary + Chronicle Post]
   E --> I[Session Artifacts on Disk]
@@ -156,7 +193,7 @@ If `ffmpeg` is not found after install, restart PowerShell and check again.
 - `AUDIO_TARGET_CHANNELS=0` / `AUDIO_TARGET_SAMPLE_RATE=0` (default): keep source channels/sample-rate.
 - Recommended long-session preset: `AUDIO_DUAL_PIPELINE_ENABLED=true`, `AUDIO_NORMALIZE=true`, `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`.
 - Keep `AUDIO_VAD_ENABLED=false` for the first pass unless you specifically need silence trimming.
-- Optional sidecar routing (draft): `VOICE_SIDECAR_ENABLED=true` with `VOICE_SIDECAR_BASE_URL=http://127.0.0.1:8081` and shared `SIDECAR_TOKEN`.
+- Optional sidecar routing: `VOICE_SIDECAR_ENABLED=true` with `VOICE_SIDECAR_BASE_URL=http://127.0.0.1:8081` and shared `SIDECAR_TOKEN`.
 - Optional live ASR in sidecar mode: `LIVE_CHUNK_TRANSCRIBE_ON_ROTATION=true` (incremental ASR kicks in after each rotation, so final stop is mostly summary work).
 - Speech-friendly preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=5`.
 - Extra compact preset example: `AUDIO_TARGET_CHANNELS=1`, `AUDIO_TARGET_SAMPLE_RATE=16000`, `AUDIO_MP3_VBR_QUALITY=6`.
@@ -172,7 +209,7 @@ Long session processing options:
   - `SUMMARY_CONTEXT_RELEVANCE_GATE=true`
   - `SUMMARY_CONTEXT_MIN_RELEVANCE=0.40`
   - if transcript relevance is below threshold, summary runs without campaign context/hints.
-- `RECORDING_ROTATION_SECONDS=1800` rotates recording into segments every 30 min (set `0` to disable).
+- `RECORDING_ROTATION_SECONDS=900` rotates recording into segments every 15 min (set `0` to disable).
 - `RECOVERY_AUTO_POST_PARTIAL=true` attempts startup recovery post for unfinished sessions.
 - `RECOVERY_MAX_SESSIONS=20` limits how many unfinished sessions are auto-posted per startup.
 - Active runtime session state is persisted at `data/runtime/active_sessions.json`.
@@ -325,6 +362,7 @@ This repo includes compose services for both LLM modes:
 - `bot` (default): Discord Chronicle Keeper + external LM Studio endpoint
 - `bot_docker_llm` (`docker-llm` profile): Discord Chronicle Keeper + Docker model runner
 - `bot_sidecar` (`voice-sidecar` profile): bot preconfigured for sidecar mode (`VOICE_SIDECAR_ENABLED=true`)
+- `bot_sidecar_gpu` (`voice-sidecar-gpu` profile): sidecar-mode bot with CUDA torch wheel and `gpus: all`
 - `voice_sidecar` (`voice-sidecar` profile): Node voice runtime + control API
 - `llm` model via Docker Compose models: `ai/gpt-oss:20B-MXFP4`
 
@@ -384,14 +422,21 @@ Notes:
 - The bot uses generic `LLM_*` env vars, so you can run any OpenAI-compatible local endpoint manually or through compose models.
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
-- Sidecar contract (draft): `docs/voice-sidecar-contract.md`.
+- Sidecar contract: `docs/voice-sidecar-contract.md`.
 
-Sidecar + bot mode (draft path, with health-gated startup):
+Sidecar + bot mode (with health-gated startup):
 
 ```bash
 docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
 ```
 (`bot_sidecar` waits for healthy `voice_sidecar`; `--scale bot=0` disables default bot to avoid duplicate Discord login.)
+
+Sidecar + bot GPU mode:
+
+```bash
+docker compose --profile voice-sidecar-gpu up -d --build --remove-orphans --scale bot=0
+```
+(`bot_sidecar_gpu` waits for healthy `voice_sidecar`; disable default `bot` to avoid duplicate Discord login.)
 
 ### Smoke E2E (ASR + LLM)
 

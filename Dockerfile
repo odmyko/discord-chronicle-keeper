@@ -5,6 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+ARG TORCH_VERSION=""
+ARG TORCH_WHL_INDEX_URL=""
+
 # ffmpeg is required for WAV -> MP3 compression.
 # git is required because py-cord is installed from a git URL.
 RUN apt-get update \
@@ -12,6 +15,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
+RUN if [ -n "$TORCH_VERSION" ] && [ -n "$TORCH_WHL_INDEX_URL" ]; then \
+      pip install --no-cache-dir "torch==${TORCH_VERSION}" --index-url "${TORCH_WHL_INDEX_URL}"; \
+    fi
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY chronicle_keeper ./chronicle_keeper

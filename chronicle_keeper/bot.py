@@ -511,7 +511,16 @@ def build_bot(settings: Settings) -> commands.Bot:
         state = guild_state.setdefault(guild_id, GuildRecordingState())
         session_dir = state.session_dir
         if session_dir is None:
+            logger.info(
+                "[sidecar-live-asr] skip guild_id=%s reason=no_session_dir",
+                guild_id,
+            )
             return
+        logger.info(
+            "[sidecar-live-asr] start guild_id=%s session_dir=%s",
+            guild_id,
+            session_dir,
+        )
         try:
             processed, total = await processor.transcribe_saved_session_incremental(
                 session_dir=session_dir,
@@ -536,15 +545,32 @@ def build_bot(settings: Settings) -> commands.Bot:
 
     def _schedule_live_chunk_transcribe(guild_id: int) -> None:
         if not settings.live_chunk_transcribe_on_rotation:
+            logger.debug(
+                "[sidecar-live-asr] skip_schedule guild_id=%s reason=disabled",
+                guild_id,
+            )
             return
         state = guild_state.setdefault(guild_id, GuildRecordingState())
         if state.session_dir is None:
+            logger.info(
+                "[sidecar-live-asr] skip_schedule guild_id=%s reason=no_session_dir",
+                guild_id,
+            )
             return
         if (
             state.live_transcribe_task is not None
             and not state.live_transcribe_task.done()
         ):
+            logger.info(
+                "[sidecar-live-asr] skip_schedule guild_id=%s reason=task_in_flight",
+                guild_id,
+            )
             return
+        logger.info(
+            "[sidecar-live-asr] schedule guild_id=%s session_dir=%s",
+            guild_id,
+            state.session_dir,
+        )
         state.live_transcribe_task = asyncio.create_task(
             _run_live_chunk_transcribe(guild_id)
         )
@@ -1245,6 +1271,12 @@ def build_bot(settings: Settings) -> commands.Bot:
                 segments_written = int(session_payload.get("segments_written", 0))
                 state.persisted_segments = max(
                     state.persisted_segments, segments_written
+                )
+                logger.info(
+                    "[sidecar-rotation] rotated guild_id=%s segments_written=%s persisted=%s",
+                    guild_id,
+                    segments_written,
+                    state.persisted_segments,
                 )
                 upsert_active_session(
                     guild_id,

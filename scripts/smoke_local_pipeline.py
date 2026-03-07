@@ -6,6 +6,11 @@ from datetime import UTC, datetime
 import shutil
 import subprocess
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from chronicle_keeper.asr import create_asr_client
 from chronicle_keeper.config import load_settings

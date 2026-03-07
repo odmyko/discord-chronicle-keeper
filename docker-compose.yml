@@ -42,12 +42,34 @@ services:
       VOICE_SIDECAR_TIMEOUT_SECONDS: ${VOICE_SIDECAR_TIMEOUT_SECONDS:-30}
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:-}
 
+  bot_sidecar_gpu:
+    <<: *bot-common
+    profiles: ["voice-sidecar-gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TORCH_VERSION: ${TORCH_VERSION:-2.8.0}
+        TORCH_WHL_INDEX_URL: ${TORCH_WHL_INDEX_URL:-https://download.pytorch.org/whl/cu129}
+    depends_on:
+      voice_sidecar:
+        condition: service_healthy
+    gpus: all
+    environment:
+      DATA_DIR: /app/data
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
+      VOICE_SIDECAR_ENABLED: "true"
+      VOICE_SIDECAR_BASE_URL: http://voice_sidecar:8081
+      VOICE_SIDECAR_TIMEOUT_SECONDS: ${VOICE_SIDECAR_TIMEOUT_SECONDS:-30}
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:-}
+
   voice_sidecar:
     build:
       context: ./voice_sidecar
       dockerfile: Dockerfile
     image: chronicle-voice-sidecar:latest
-    profiles: ["voice-sidecar"]
+    profiles: ["voice-sidecar", "voice-sidecar-gpu"]
     restart: unless-stopped
     env_file:
       - .env

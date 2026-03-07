@@ -74,6 +74,11 @@ class Qwen3ASRClient:
 
         dtype = self._resolve_dtype(torch)
         device_map = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if device_map == "cpu":
+            logger.warning(
+                "[qwen3-asr] cuda_unavailable torch=%s; ASR will run on CPU (slower).",
+                getattr(torch, "__version__", "unknown"),
+            )
         load_kwargs: dict[str, Any] = {
             "max_inference_batch_size": self._max_inference_batch_size,
             "max_new_tokens": self._max_new_tokens,
