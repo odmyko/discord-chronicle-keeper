@@ -401,10 +401,10 @@ Fast rebuild tips:
 - Rebuild only bot image after code changes: `docker compose build bot_sidecar && docker compose up -d bot_sidecar`.
 - Rebuild only GPU bot image: `docker compose build bot_sidecar_gpu && docker compose up -d bot_sidecar_gpu`.
 
-Start only sidecar runtime/API (for contract/integration testing):
+Start only sidecar runtime/API (no Discord bot login):
 
 ```bash
-docker compose --profile voice-sidecar up -d --build
+docker compose --profile voice-sidecar up -d --build voice_sidecar
 curl http://127.0.0.1:8081/health
 ```
 

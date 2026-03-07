@@ -19,9 +19,9 @@ Discord Chronicle Keeper is a local-first pipeline:
   - transcription + summarization orchestration
 - `bot_docker_llm` (compose profile `docker-llm`):
   - same bot code, but LLM endpoint comes from Docker model runner
-- `voice_sidecar` (compose profile `voice-sidecar`, draft):
-  - Node control API scaffold for future voice runtime split
-  - current phase is contract only; no audio capture yet
+- `voice_sidecar` (compose profile `voice-sidecar`):
+  - Node voice runtime + control API for Discord DAVE/E2EE-compatible capture
+  - used by `bot_sidecar` / `bot_sidecar_gpu` when `VOICE_SIDECAR_ENABLED=true`
 - ASR runtime:
   - local Qwen3-ASR via Python (`QWEN3_ASR_*` env)
 
