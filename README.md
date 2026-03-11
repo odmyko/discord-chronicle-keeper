@@ -6,21 +6,25 @@ Discord bot for DnD/TTRPG with a fully local pipeline:
 - generate a summary and player-facing chronicle post through a local OpenAI-compatible LLM endpoint (LM Studio or Docker model runner);
 - publish everything to a dedicated text channel for chronicles.
 
+## Who This README Is For
+
+Two roles matter here:
+
+1. Host / self-hoster: you run the backend, bot token, ASR, and LLM.
+2. DM / server admin: you invite the already-running bot to a Discord server and use slash commands.
+
+If you are the host, start with the quickstart below. If you are the DM, skip to `For DM / Server Admin`.
+
 ## Choose Run Mode
 
-Pick one path first, then follow only that section:
+Pick one host path first, then follow only that section:
 
 1. Local Python app + local Qwen ASR + external LLM endpoint.
 2. Docker Compose + LM Studio (default bot service, no Docker LLM model).
 3. Docker Compose + Docker model runner (`docker-llm` profile, no LM Studio required).
-4. Bot + Node voice sidecar (`voice-sidecar` profile) for Discord DAVE/E2EE-compatible voice capture.
+4. Docker Compose + Node voice sidecar (`voice-sidecar` profile) when the default Python voice path is not enough for your Discord voice setup.
 
-Important:
-- DAVE/E2EE is **not enabled by default**.
-- Default local Python voice receive path can fail on DAVE-required voice channels (close code `4017`).
-- For DAVE-required channels, use sidecar mode.
-
-## Quickstart (5 min, Local Python Mode)
+## Host Quickstart (5 min, Local Python Mode)
 
 1. Clone repo and install Python deps:
 ```bash
@@ -51,14 +55,11 @@ Copy-Item .env.example .env
 ```bash
 python -m chronicle_keeper.bot
 ```
-4. In Discord, run:
-- `/chronicle_setup_channels`
-- `/chronicle_start`
-- `/chronicle_stop`
+4. Confirm the bot is online in Discord, then continue with `For DM / Server Admin`.
 
-## Quickstart (DAVE/E2EE Channels, Recommended)
+## Host Quickstart (Voice Sidecar Mode)
 
-If your voice channel requires DAVE/E2EE, run sidecar mode:
+If you want the Node voice sidecar path, run:
 
 ```bash
 docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
@@ -87,6 +88,30 @@ Quick GPU check inside bot container:
 ```bash
 docker compose exec bot_sidecar_gpu python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 ```
+
+## For DM / Server Admin
+
+Assumption: the host has already started the bot backend and given you the bot invite link.
+
+What you do on your Discord server:
+
+1. Invite the bot to the server.
+2. Make sure the bot can:
+   - view channels
+   - send messages
+   - attach files
+   - use slash commands
+   - connect to voice channels
+3. In Discord, run:
+   - `/chronicle_setup_channels`
+   - `/chronicle_campaign_create`
+   - `/chronicle_campaign_use`
+   - `/chronicle_start`
+   - `/chronicle_stop`
+
+Notes:
+- `/chronicle_start` requires an active campaign, so create and select one first.
+- The host chooses how the backend is run; the DM does not need to care whether it is local Python, Docker LLM, or sidecar mode.
 
 ## Docs
 
@@ -428,20 +453,7 @@ Notes:
 - LLM model config sets max context `131072`.
 - On startup the bot runs a lightweight config doctor and logs obvious misconfiguration warnings.
 - Sidecar contract: `docs/voice-sidecar-contract.md`.
-
-Sidecar + bot mode (with health-gated startup):
-
-```bash
-docker compose --profile voice-sidecar up -d --build --remove-orphans --scale bot=0
-```
-(`bot_sidecar` waits for healthy `voice_sidecar`; `--scale bot=0` disables default bot to avoid duplicate Discord login.)
-
-Sidecar + bot GPU mode:
-
-```bash
-docker compose --profile voice-sidecar-gpu up -d --build --remove-orphans --scale bot=0
-```
-(`bot_sidecar_gpu` waits for healthy `voice_sidecar`; disable default `bot` to avoid duplicate Discord login.)
+- For sidecar bot modes, use the `Host Quickstart (Voice Sidecar Mode)` commands above.
 
 ### Smoke E2E (ASR + LLM)
 
@@ -490,9 +502,6 @@ python scripts/smoke_e2e.py --audio data/sessions/<guild>/<session>/audio/mixed_
 - `/chronicle_cleanup_now` - run retention cleanup immediately (Manage Server required).
 - `/chronicle_purge_session` - delete one saved session by id (Manage Server required, `ALLOW_PURGE_COMMANDS=true`).
 - `/chronicle_purge_guild_data` - delete all saved sessions for this guild (Manage Server required; requires `PURGE` confirmation and `ALLOW_PURGE_COMMANDS=true`).
-
-Note:
-- `/chronicle_start` requires an active campaign (`/chronicle_campaign_create` + `/chronicle_campaign_use`).
 
 ## Campaign Workflow (Recommended)
 
